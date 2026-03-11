@@ -1,9 +1,18 @@
 from typing import Sequence
 import numpy as np
-from fastembed import TextEmbedding
 
 from engine.src.config import EmbeddingConfig
 from engine.src.providers.base import EmbeddingProvider
+
+
+def _get_fastembed_class():
+    """
+    Lazy-import fastembed TextEmbedding.
+
+    Returns: type — The TextEmbedding class.
+    """
+    from fastembed import TextEmbedding
+    return TextEmbedding
 
 
 class FastEmbedProvider(EmbeddingProvider):
@@ -19,16 +28,17 @@ class FastEmbedProvider(EmbeddingProvider):
         config: EmbeddingConfig — Must have provider="fastembed".
         """
         super().__init__(config)
-        self._model: TextEmbedding | None = None
+        self._model = None
 
-    def _ensure_model(self) -> TextEmbedding:
+    def _ensure_model(self):
         """
         Lazy-load the fastembed model on first use.
 
         Returns: TextEmbedding — Loaded model instance.
         """
         if self._model is None:
-            self._model = TextEmbedding(model_name=self._config.model)
+            cls = _get_fastembed_class()
+            self._model = cls(model_name=self._config.model)
         return self._model
 
     def embed(self, texts: Sequence[str]) -> list[np.ndarray]:

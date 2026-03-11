@@ -2,16 +2,24 @@ import os
 from typing import Sequence
 
 import numpy as np
-import litellm
-from litellm import embedding as litellm_embedding
 
 from engine.src.config import EmbeddingConfig
 from engine.src.providers.base import EmbeddingProvider
 
 
-os.environ.setdefault("LITELLM_LOG", "ERROR")
-litellm.suppress_debug_info = True
-litellm.set_verbose = False
+def _get_litellm_embedding():
+    """
+    Lazy-import litellm embedding entrypoint and suppress debug output.
+
+    Returns: callable — litellm.embedding function.
+    """
+    import litellm
+    from litellm import embedding as litellm_embedding
+
+    os.environ.setdefault("LITELLM_LOG", "ERROR")
+    litellm.suppress_debug_info = True
+    litellm.set_verbose = False
+    return litellm_embedding
 
 
 class LiteLLMProvider(EmbeddingProvider):
@@ -51,7 +59,7 @@ class LiteLLMProvider(EmbeddingProvider):
         if self._config.api_base:
             kwargs["api_base"] = self._config.api_base
 
-        response = litellm_embedding(**kwargs)
+        response = _get_litellm_embedding()(**kwargs)
 
         vectors = []
         for item in response.data:
