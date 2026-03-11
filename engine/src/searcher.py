@@ -1,8 +1,12 @@
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import hashlib
+import json
 import re
 from threading import Lock
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from qdrant_client import QdrantClient, models
@@ -19,6 +23,7 @@ RRF_K = 60
 TOP_RANK_BONUS_1 = 0.05
 TOP_RANK_BONUS_2_3 = 0.02
 QUERY_CACHE_SIZE = 256
+DISK_QUERY_CACHE_LIMIT = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,33 +231,48 @@ class CodeSearcher:
         Returns:
             list[SearchResult] — Results sorted by relevance.
         """
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            code_future = executor.submit(
-                self.search_code,
-                query=query,
-                limit=max(limit * 3, 30),
-                language=language,
-                file_path=file_path,
-                path_prefix=path_prefix,
-                symbol_kind=symbol_kind,
-                use_keywords=use_keywords,
-                keyword_weight=keyword_weight,
-                rerank=False,
-            )
-            desc_future = executor.submit(
-                self.search_description,
-                query=query,
-                limit=max(limit * 3, 30),
-                language=language,
-                file_path=file_path,
-                path_prefix=path_prefix,
-                symbol_kind=symbol_kind,
-                use_keywords=use_keywords,
-                keyword_weight=keyword_weight,
-                rerank=False,
-            )
-            code_results = code_future.result()
-            desc_results = desc_future.result()
+        query_keywords = self._extract_keywords_cached(query) if use_keywords else []
+        request_limit = max(limit * 3, 30)
+
+        if self._can_share_query_embedding():
+            shared_vector = self._embed_query_with_provider_cached(query, self._code_provider, cache_key="shared")
+            code_vector = shared_vector
+            desc_vector = shared_vector
+        else:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                code_future = executor.submit(self._embed_query_cached, query, "code")
+                desc_future = executor.submit(self._embed_query_cached, query, "description")
+                code_vector = code_future.result()
+                desc_vector = desc_future.result()
+
+        code_results, desc_results = self._batch_search(
+            requests=[
+                {
+                    "query": query,
+                    "query_vector": code_vector,
+                    "using": "code",
+                    "limit": request_limit,
+                    "language": language,
+                    "file_path": file_path,
+                    "path_prefix": path_prefix,
+                    "symbol_kind": symbol_kind,
+                    "query_keywords": query_keywords,
+                    "keyword_weight": keyword_weight,
+                },
+                {
+                    "query": query,
+                    "query_vector": desc_vector,
+                    "using": "description",
+                    "limit": request_limit,
+                    "language": language,
+                    "file_path": file_path,
+                    "path_prefix": path_prefix,
+                    "symbol_kind": symbol_kind,
+                    "query_keywords": query_keywords,
+                    "keyword_weight": keyword_weight,
+                },
+            ]
+        )
 
         fused = self._rrf_fuse(
             [code_results, desc_results],
@@ -317,54 +337,52 @@ class CodeSearcher:
         if not sub_queries:
             return []
 
-        def _run_subquery(sub: StructuredSubQuery, idx: int) -> tuple[list[SearchResult], float]:
-            weight = first_query_weight if idx == 0 else 1.0
-            if sub.kind == "lex":
-                results = self.search_code(
-                    query=sub.text,
-                    limit=max(limit * 3, 30),
-                    language=language,
-                    file_path=file_path,
-                    path_prefix=path_prefix,
-                    symbol_kind=symbol_kind,
-                    use_keywords=use_keywords,
-                    keyword_weight=max(keyword_weight, 0.45),
-                    rerank=False,
-                )
-            else:
-                results = self.search_description(
-                    query=sub.text,
-                    limit=max(limit * 3, 30),
-                    language=language,
-                    file_path=file_path,
-                    path_prefix=path_prefix,
-                    symbol_kind=symbol_kind,
-                    use_keywords=use_keywords,
-                    keyword_weight=keyword_weight,
-                    rerank=False,
-                )
-            return results, weight
-
-        result_lists: list[list[SearchResult]] = []
+        requests: list[dict] = []
         weights: list[float] = []
-        max_workers = min(4, max(1, len(sub_queries)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(_run_subquery, sub, idx)
-                for idx, sub in enumerate(sub_queries)
-            ]
-            for future in futures:
-                results, weight = future.result()
-                if results:
-                    result_lists.append(results)
-                    weights.append(weight)
+        for idx, sub in enumerate(sub_queries):
+            weight = first_query_weight if idx == 0 else 1.0
+            weights.append(weight)
+
+            if sub.kind == "lex":
+                query_vector = self._embed_query_cached(sub.text, "code")
+                per_query_keyword_weight = max(keyword_weight, 0.45)
+                using = "code"
+            else:
+                provider = self._code_provider if self._can_share_query_embedding() else self._desc_provider
+                cache_key = "shared" if self._can_share_query_embedding() else "description"
+                query_vector = self._embed_query_with_provider_cached(sub.text, provider, cache_key)
+                per_query_keyword_weight = keyword_weight
+                using = "description"
+
+            requests.append(
+                {
+                    "query": sub.text,
+                    "query_vector": query_vector,
+                    "using": using,
+                    "limit": max(limit * 3, 30),
+                    "language": language,
+                    "file_path": file_path,
+                    "path_prefix": path_prefix,
+                    "symbol_kind": symbol_kind,
+                    "query_keywords": self._extract_keywords_cached(sub.text) if use_keywords else [],
+                    "keyword_weight": per_query_keyword_weight,
+                }
+            )
+
+        batch_results = self._batch_search(requests)
+        result_lists: list[list[SearchResult]] = []
+        filtered_weights: list[float] = []
+        for idx, results in enumerate(batch_results):
+            if results:
+                result_lists.append(results)
+                filtered_weights.append(weights[idx])
 
         if not result_lists:
             return []
 
         fused = self._rrf_fuse(
             result_lists,
-            weights,
+            filtered_weights,
             k=rrf_k,
             top_rank_bonus_1=top_rank_bonus_1,
             top_rank_bonus_2_3=top_rank_bonus_2_3,
@@ -708,6 +726,400 @@ class CodeSearcher:
             return self._blend_with_rerank(query, search_results, limit)
 
         return search_results[:limit]
+
+    def _batch_search(self, requests: list[dict]) -> list[list[SearchResult]]:
+        """
+        Execute multiple vector searches against the same collection in one batch.
+
+        requests: list[dict] — Search request dictionaries matching _search parameters.
+        Returns: list[list[SearchResult]] — Results in request order.
+        """
+        if not requests:
+            return []
+
+        query_requests: list[models.QueryRequest] = []
+        contexts: list[dict] = []
+
+        for request in requests:
+            query_filter, normalized_path_prefix, fetch_limit = self._build_query_filter(
+                limit=request["limit"],
+                language=request["language"],
+                file_path=request["file_path"],
+                path_prefix=request["path_prefix"],
+                symbol_kind=request["symbol_kind"],
+                query_keywords=request["query_keywords"],
+                rerank=False,
+            )
+            query_requests.append(
+                models.QueryRequest(
+                    query=request["query_vector"],
+                    using=request["using"],
+                    filter=query_filter,
+                    limit=fetch_limit,
+                    with_payload=True,
+                )
+            )
+            contexts.append(
+                {
+                    "query_keywords": request["query_keywords"],
+                    "keyword_weight": request["keyword_weight"],
+                    "normalized_path_prefix": normalized_path_prefix,
+                    "query_vector": request["query_vector"],
+                    "using": request["using"],
+                    "limit": request["limit"],
+                }
+            )
+
+        responses = self._client.query_batch_points(
+            collection_name=self._collection_name,
+            requests=query_requests,
+        )
+
+        out: list[list[SearchResult]] = []
+        for request, response, context in zip(requests, responses, contexts):
+            results = self._points_to_results(
+                points=response.points,
+                query_keywords=context["query_keywords"],
+                keyword_weight=context["keyword_weight"],
+                normalized_path_prefix=context["normalized_path_prefix"],
+            )
+            if context["normalized_path_prefix"] and not response.points:
+                fallback_filter = self._build_fallback_query_filter(
+                    language=request["language"],
+                    file_path=request["file_path"],
+                    symbol_kind=request["symbol_kind"],
+                )
+                fallback_response = self._client.query_points(
+                    collection_name=self._collection_name,
+                    query=context["query_vector"],
+                    using=context["using"],
+                    query_filter=fallback_filter,
+                    limit=max(context["limit"] * 25, 30),
+                    with_payload=True,
+                )
+                results = self._points_to_results(
+                    points=fallback_response.points,
+                    query_keywords=context["query_keywords"],
+                    keyword_weight=context["keyword_weight"],
+                    normalized_path_prefix=context["normalized_path_prefix"],
+                )
+            out.append(results)
+
+        return out
+
+    def _build_query_filter(
+        self,
+        limit: int,
+        language: Optional[str],
+        file_path: Optional[str],
+        path_prefix: Optional[str],
+        symbol_kind: Optional[str],
+        query_keywords: list[str],
+        rerank: bool,
+    ) -> tuple[Optional[models.Filter], Optional[str], int]:
+        """
+        Build Qdrant filter and fetch sizing for a search request.
+
+        Returns: tuple[Optional[Filter], Optional[str], int]
+        """
+        filters = []
+
+        if language:
+            filters.append(
+                models.FieldCondition(
+                    key="language",
+                    match=models.MatchValue(value=language),
+                )
+            )
+
+        if file_path:
+            filters.append(
+                models.FieldCondition(
+                    key="file_path",
+                    match=models.MatchValue(value=file_path),
+                )
+            )
+
+        normalized_path_prefix = None
+        if path_prefix:
+            normalized_path_prefix = path_prefix.replace("\\", "/").strip().strip("/").lower()
+            if normalized_path_prefix:
+                filters.append(
+                    models.FieldCondition(
+                        key="path_prefixes",
+                        match=models.MatchValue(value=normalized_path_prefix),
+                    )
+                )
+
+        if symbol_kind:
+            filters.append(
+                models.Filter(
+                    should=[
+                        models.FieldCondition(
+                            key="symbol_kind",
+                            match=models.MatchValue(value=symbol_kind),
+                        ),
+                        models.FieldCondition(
+                            key="symbol_type",
+                            match=models.MatchValue(value=symbol_kind),
+                        ),
+                    ]
+                )
+            )
+
+        query_filter = models.Filter(must=filters) if filters else None
+
+        rerank_active = rerank and self._reranker is not None
+        if rerank_active:
+            fetch_limit = limit * 5
+        elif query_keywords:
+            fetch_limit = limit * 3
+        else:
+            fetch_limit = limit
+
+        if normalized_path_prefix:
+            fetch_limit = max(fetch_limit, limit * 10)
+
+        return query_filter, normalized_path_prefix, fetch_limit
+
+    def _build_fallback_query_filter(
+        self,
+        language: Optional[str],
+        file_path: Optional[str],
+        symbol_kind: Optional[str],
+    ) -> Optional[models.Filter]:
+        """
+        Build a fallback filter without path-prefix constraints.
+        """
+        query_filter, _, _ = self._build_query_filter(
+            limit=1,
+            language=language,
+            file_path=file_path,
+            path_prefix=None,
+            symbol_kind=symbol_kind,
+            query_keywords=[],
+            rerank=False,
+        )
+        return query_filter
+
+    def _points_to_results(
+        self,
+        points,
+        query_keywords: list[str],
+        keyword_weight: float,
+        normalized_path_prefix: Optional[str],
+    ) -> list[SearchResult]:
+        """
+        Convert Qdrant points to scored SearchResult objects.
+        """
+        search_results = []
+        for point in points:
+            vector_score = point.score
+            chunk_keywords = point.payload.get("keywords", [])
+            path_context = point.payload.get("path_context")
+
+            if query_keywords and chunk_keywords:
+                kw_score = keyword_overlap_score(query_keywords, chunk_keywords)
+                final_score = vector_score * (1 - keyword_weight) + kw_score * keyword_weight
+            else:
+                final_score = vector_score
+
+            if path_context and query_keywords:
+                path_keywords = extract_keywords(path_context)
+                if path_keywords:
+                    final_score += keyword_overlap_score(query_keywords, path_keywords) * 0.1
+
+            symbol_kind_value = point.payload.get("symbol_kind") or point.payload.get("symbol_type") or "unknown"
+            symbol_name_value = point.payload["symbol_name"]
+            file_path_value = point.payload["file_path"]
+            final_score *= self._kind_score_multiplier(symbol_kind_value, len(query_keywords))
+            final_score *= self._path_signal_multiplier(file_path_value, len(query_keywords))
+
+            if query_keywords:
+                symbol_tokens = self._symbol_tokens(
+                    symbol_name_value,
+                    point.payload.get("signature"),
+                )
+                symbol_overlap = keyword_overlap_score(query_keywords, symbol_tokens)
+                final_score += symbol_overlap * 0.18
+                if len(query_keywords) >= 2 and symbol_overlap >= 0.5:
+                    final_score *= 1.12
+                if (
+                    len(query_keywords) >= 2
+                    and symbol_overlap < 0.5
+                    and symbol_kind_value.lower() in {"data_key", "variable", "property", "import"}
+                ):
+                    final_score *= 0.7
+
+                generic_symbol_names = {"main", "entry", "_start"}
+                normalized_symbol_name = symbol_name_value.lower()
+                if (
+                    len(query_keywords) > 1
+                    and normalized_symbol_name in generic_symbol_names
+                    and all(term not in normalized_symbol_name for term in query_keywords)
+                ):
+                    final_score *= 0.92
+            if normalized_path_prefix:
+                normalized_file_path = file_path_value.replace("\\", "/").lower()
+                normalized_context = (path_context or "").replace("\\", "/").lower()
+                if normalized_path_prefix not in normalized_file_path and normalized_path_prefix not in normalized_context:
+                    continue
+
+            search_results.append(
+                SearchResult(
+                    score=final_score,
+                    file_path=file_path_value,
+                    symbol_name=symbol_name_value,
+                    symbol_kind=symbol_kind_value,
+                    line_start=point.payload["line_start"],
+                    line_end=point.payload["line_end"],
+                    source=point.payload["source"],
+                    description=point.payload["description"],
+                    signature=point.payload.get("signature"),
+                    docstring=point.payload.get("docstring"),
+                    parent=point.payload.get("parent"),
+                    language=point.payload.get("language"),
+                    path_context=path_context,
+                )
+            )
+
+        search_results.sort(key=lambda item: item.score, reverse=True)
+        return search_results
+
+    def _can_share_query_embedding(self) -> bool:
+        """
+        Determine whether code and description searches can reuse one embedding.
+        """
+        return (
+            type(self._code_provider) is type(self._desc_provider)
+            and self._code_provider.model == self._desc_provider.model
+            and self._code_provider.dimension == self._desc_provider.dimension
+        )
+
+    def _embed_query_with_provider_cached(
+        self,
+        query: str,
+        provider: EmbeddingProvider,
+        cache_key: str,
+    ) -> list[float]:
+        """
+        Cache query embedding for a specific provider-equivalence bucket.
+        """
+        key = (cache_key, query)
+        with self._cache_lock:
+            cached = self._query_vector_cache.get(key)
+            if cached is not None:
+                self._query_vector_cache.move_to_end(key)
+                return cached
+
+        disk_cached = self._load_query_vector_from_disk(
+            query=query,
+            provider=provider,
+            cache_key=cache_key,
+        )
+        if disk_cached is not None:
+            with self._cache_lock:
+                self._query_vector_cache[key] = disk_cached
+                self._query_vector_cache.move_to_end(key)
+                while len(self._query_vector_cache) > QUERY_CACHE_SIZE:
+                    self._query_vector_cache.popitem(last=False)
+            return disk_cached
+
+        vector = provider.embed_single(query).tolist()
+
+        self._store_query_vector_to_disk(
+            query=query,
+            provider=provider,
+            cache_key=cache_key,
+            vector=vector,
+        )
+        with self._cache_lock:
+            self._query_vector_cache[key] = vector
+            self._query_vector_cache.move_to_end(key)
+            while len(self._query_vector_cache) > QUERY_CACHE_SIZE:
+                self._query_vector_cache.popitem(last=False)
+
+        return vector
+
+    def _query_cache_dir(self) -> Path:
+        """
+        Return the disk cache directory for persisted query embeddings.
+        """
+        cache_dir = Path.cwd().resolve() / ".quickcontext" / "query_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
+
+    def _query_cache_path(self, query: str, provider: EmbeddingProvider, cache_key: str) -> Path:
+        """
+        Build a stable on-disk cache path for a query embedding.
+        """
+        provider_key = f"{type(provider).__name__}:{provider.model}:{provider.dimension}:{cache_key}:{query}"
+        digest = hashlib.sha256(provider_key.encode("utf-8")).hexdigest()
+        return self._query_cache_dir() / f"{digest}.json"
+
+    def _load_query_vector_from_disk(
+        self,
+        query: str,
+        provider: EmbeddingProvider,
+        cache_key: str,
+    ) -> Optional[list[float]]:
+        """
+        Load a persisted query embedding vector if available.
+        """
+        cache_path = self._query_cache_path(query, provider, cache_key)
+        if not cache_path.exists():
+            return None
+
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            vector = payload.get("vector")
+            if not isinstance(vector, list):
+                return None
+            cache_path.touch()
+            return [float(value) for value in vector]
+        except Exception:
+            return None
+
+    def _store_query_vector_to_disk(
+        self,
+        query: str,
+        provider: EmbeddingProvider,
+        cache_key: str,
+        vector: list[float],
+    ) -> None:
+        """
+        Persist a query embedding vector for reuse across CLI runs.
+        """
+        cache_path = self._query_cache_path(query, provider, cache_key)
+        payload = {
+            "query": query,
+            "provider": type(provider).__name__,
+            "model": provider.model,
+            "dimension": provider.dimension,
+            "stored_at": time.time(),
+            "vector": vector,
+        }
+        try:
+            cache_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            self._prune_disk_query_cache()
+        except Exception:
+            return
+
+    def _prune_disk_query_cache(self) -> None:
+        """
+        Keep the on-disk query embedding cache bounded by entry count.
+        """
+        cache_dir = self._query_cache_dir()
+        files = sorted(
+            cache_dir.glob("*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in files[DISK_QUERY_CACHE_LIMIT:]:
+            try:
+                path.unlink()
+            except OSError:
+                continue
 
     def _kind_score_multiplier(self, symbol_kind: str, query_keyword_count: int) -> float:
         """
