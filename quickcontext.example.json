@@ -1,0 +1,43 @@
+{
+  "qdrant": {
+    "host": "localhost",
+    "port": 6333,
+    "grpc_port": 6334,
+    "prefer_grpc": true,
+    "collection": "codebase",
+    "timeout": 30.0
+  },
+  "code_embedding": {
+    "provider": "litellm",
+    "model": "openrouter/qwen/qwen3-embedding-8b",
+    "dimension": 4096,
+    "batch_size": 32,
+    "api_key": "YOUR_OPENROUTER_API_KEY"
+  },
+  "desc_embedding": {
+    "provider": "litellm",
+    "model": "openrouter/qwen/qwen3-embedding-8b",
+    "dimension": 4096,
+    "batch_size": 32,
+    "api_key": "YOUR_OPENROUTER_API_KEY"
+  },
+  "llm": {
+    "provider": "litellm",
+    "model": "openrouter/openai/gpt-oss-20b",
+    "max_tokens": 256,
+    "temperature": 0.0,
+    "api_key": "YOUR_OPENROUTER_API_KEY"
+  },
+  "vectors": [
+    {
+      "name": "code",
+      "dimension": 4096,
+      "distance": "cosine"
+    },
+    {
+      "name": "description",
+      "dimension": 4096,
+      "distance": "cosine"
+    }
+  ]
+}

@@ -1,0 +1,141 @@
+# AI_DOCS
+
+## Purpose
+
+quickcontext is a local code context engine.
+
+The repository currently focuses on:
+
+- a Rust service for parsing and search operations
+- a Python engine for indexing, retrieval, embeddings, and orchestration
+
+The project is still in progress. There is room to improve architecture, speed, ranking quality, and developer experience. MCP support is planned but not yet part of the tracked repo.
+
+## Architecture
+
+- `service/`: Rust binary and IPC server
+- `engine/`: Python SDK and CLI
+
+Flow:
+
+1. Python talks to Rust through local IPC
+2. Rust handles parser and search-heavy operations
+3. Python handles indexing, embeddings, Qdrant collections, and higher-level workflows
+
+## IPC Transport
+
+The protocol is the same on all supported platforms:
+
+- 4-byte little-endian length prefix
+- JSON request payload
+- JSON response payload
+
+Endpoints:
+
+- Windows: `\\.\pipe\quickcontext`
+- Linux: `QC_SOCKET_PATH`, then `$XDG_RUNTIME_DIR/quickcontext.sock`, then `/tmp/quickcontext-<user>.sock`
+
+## Configuration
+
+Configuration resolution order:
+
+1. `quickcontext.json` or `.quickcontext.json`
+2. `QC_*` environment variables
+3. built-in defaults from `engine/src/config.py`
+
+Important config ideas:
+
+- parser-only commands do not require Qdrant or embeddings
+- indexing and semantic search require Qdrant plus embedding configuration
+- local example config uses `fastembed`
+- cloud example config uses `litellm`
+- embedding dimensions must match the Qdrant collection vector dimensions
+
+## Important Python Modules
+
+- `engine/src/cli.py`: CLI surface
+- `engine/src/config.py`: config schema and defaults
+- `engine/src/collection.py`: Qdrant collection lifecycle and aliases
+- `engine/src/indexer.py`: upsert and payload handling
+- `engine/src/searcher.py`: semantic and structured retrieval
+- `engine/src/query_dsl.py`: typed query parser
+- `engine/src/chunker.py`: symbol-to-chunk conversion
+- `engine/src/differ.py`: chunk diffing
+- `engine/src/embedder.py`: embedding pipeline
+- `engine/src/describer.py`: description generation
+- `engine/src/parsing.py`: typed wrappers over Rust service calls
+- `engine/src/pipe.py`: IPC client
+- `engine/src/watcher.py`: filesystem watch and refresh
+
+## Important Rust Modules
+
+- `service/src/main.rs`: service CLI
+- `service/src/server.rs`: IPC server and request dispatch
+- `service/src/protocol.rs`: request and response schema
+- `service/src/extract.rs`: AST extraction
+- `service/src/grep.rs`: literal grep
+- `service/src/text_search.rs`: BM25-style text search
+- `service/src/protocol_search.rs`: request and response contract extraction
+- `service/src/pattern_match.rs`: structural pattern search
+- `service/src/pattern_rewrite.rs`: structural rewrite
+- `service/src/symbol_index.rs`: symbol lookup and caller tracing
+- `service/src/import_graph.rs`: dependency and importer graph
+- `service/src/lsp/`: language server integration
+- `service/src/lang/`: tree-sitter language registry
+
+## Execution Basics
+
+Build the Rust service:
+
+- Windows: `cargo build --release --manifest-path service/Cargo.toml`
+- Linux: `cargo build --release --manifest-path service/Cargo.toml`
+
+Run the service:
+
+- Windows: `./service/target/release/quickcontext-service.exe serve`
+- Linux: `./service/target/release/quickcontext-service serve`
+
+Common engine flow:
+
+- `python -m engine status`
+- `python -m engine init`
+- `python -m engine index <path> [--project <name>]`
+- `python -m engine search "<query>" [--project <name>]`
+- `python -m engine refresh <files...>`
+- `python -m engine watch <dir>`
+
+## Strict Coding Guidelines
+
+- Keep code clean and modular.
+- Keep imports minimal and organized.
+- Avoid comments unless they explain non-obvious logic.
+- Add useful docstrings for public or non-obvious Python functions.
+- Preserve existing CLI behavior unless a change is intentional and documented.
+- Preserve the optional and lazy-loaded subsystem design.
+- Do not hardcode secrets, tokens, or machine-specific paths.
+- Keep transport and process code cross-platform when touching runtime boundaries.
+- Update `requirements.txt` when Python dependencies change.
+- Update `service/Cargo.toml` and `service/Cargo.lock` when Rust dependencies change.
+- Keep README and AI_DOCS in sync with architecture or setup changes.
+- Keep changes focused. Do not mix unrelated refactors into feature work.
+- Prefer simple solutions over clever ones when maintaining IPC, indexing, and search code.
+
+## Contribution Priorities
+
+Useful areas for contributors:
+
+- search relevance and ranking
+- indexing performance
+- chunk quality
+- protocol extraction quality
+- cross-platform support
+- LSP reliability
+- future MCP support
+
+## Notes For AI Agents
+
+- Read the code before proposing structural changes.
+- Treat `engine/` and `service/` as the core product surface.
+- When touching indexing or search, check dimension compatibility and collection behavior.
+- When touching IPC, keep Windows and Linux behavior aligned at the protocol level.
+- When touching docs, keep them plain, direct, and easy to navigate.

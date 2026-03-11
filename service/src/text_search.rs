@@ -1,0 +1,595 @@
+use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
+use std::time::Instant;
+
+use crate::intent::{build_intent_terms, normalize_intent_level, IntentTerms};
+use crate::lang::LanguageSpec;
+use crate::query_parser::{ParsedQuery, QueryExpr, QueryParser};
+use crate::ranking::Bm25Scorer;
+use crate::structural_boost;
+use crate::text_index::{search_candidates, IndexedCandidate};
+use crate::types::{TextSearchMatch, TextSearchResult};
+
+const SNIPPET_CONTEXT_LINES: usize = 3;
+
+
+/// Full-text search over files using persistent BM25 candidates and structural reranking.
+///
+/// query_str: &str — Raw query string with optional operators and filters.
+/// root: &Path — Directory or file to search within.
+/// respect_gitignore: bool — Whether to honor .gitignore rules.
+/// limit: usize — Maximum number of results to return.
+/// specs: &[LanguageSpec] — Language specs for file detection.
+/// intent_mode: bool — When true, enable non-embedding intent expansion for simple queries.
+/// intent_level: u8 — Intent expansion aggressiveness from 1..=3.
+pub fn text_search(
+    query_str: &str,
+    root: &Path,
+    respect_gitignore: bool,
+    limit: usize,
+    specs: &[LanguageSpec],
+    intent_mode: bool,
+    intent_level: u8,
+) -> Result<TextSearchResult, String> {
+    if query_str.trim().is_empty() {
+        return Err("query cannot be empty".to_string());
+    }
+    if !root.exists() {
+        return Err(format!("path does not exist: {}", root.display()));
+    }
+
+    let start = Instant::now();
+    let effective_limit = limit.max(1);
+
+    let parser = QueryParser::new();
+    let parsed = parser.parse(query_str);
+
+    if parsed.expr.is_none() {
+        return Err("query produced no searchable terms".to_string());
+    }
+
+    let normalized_intent_level = normalize_intent_level(intent_level);
+    let intent_terms = if intent_mode {
+        build_intent_terms(query_str, normalized_intent_level)
+    } else {
+        IntentTerms {
+            exact_terms: Vec::new(),
+            expanded_terms: Vec::new(),
+        }
+    };
+
+    let search_query = if intent_mode {
+        build_bm25_query(&parsed.raw, &intent_terms)
+    } else {
+        parsed.raw.clone()
+    };
+
+    let max_candidates = effective_limit.saturating_mul(4).max(effective_limit + 2);
+    let (candidates, searched_files) = search_candidates(
+        root,
+        specs,
+        respect_gitignore,
+        &parsed.filter,
+        &search_query,
+        max_candidates,
+    )?;
+
+    if candidates.is_empty() {
+        return Ok(TextSearchResult {
+            matches: Vec::new(),
+            searched_files,
+            query_expr: format!("{:?}", parsed.expr),
+            duration_ms: start.elapsed().as_millis(),
+            truncated: false,
+        });
+    }
+
+    let mut results = score_and_rank(
+        &parsed,
+        &candidates,
+        effective_limit,
+        intent_mode,
+        normalized_intent_level,
+        &intent_terms,
+    );
+    let truncated = results.len() > effective_limit;
+    results.truncate(effective_limit);
+
+    Ok(TextSearchResult {
+        matches: results,
+        searched_files,
+        query_expr: format!("{:?}", parsed.expr),
+        duration_ms: start.elapsed().as_millis(),
+        truncated,
+    })
+}
+
+
+/// Score indexed candidates and rerank by structural and intent-aware boosts.
+///
+/// parsed: &ParsedQuery — Parsed query with expression tree and filters.
+/// candidates: &[IndexedCandidate] — Candidate files from persistent index.
+/// limit: usize — Max results to return (fetch extra for truncation detection).
+/// intent_mode: bool — Enable intent-aware expansion/reranking.
+/// intent_level: u8 — Intent expansion aggressiveness from 1..=3.
+/// intent_terms: &IntentTerms — Precomputed exact and expanded terms for this query.
+fn score_and_rank(
+    parsed: &ParsedQuery,
+    candidates: &[IndexedCandidate],
+    limit: usize,
+    intent_mode: bool,
+    intent_level: u8,
+    intent_terms: &IntentTerms,
+) -> Vec<TextSearchMatch> {
+    let expr = match &parsed.expr {
+        Some(e) => e,
+        None => return Vec::new(),
+    };
+
+    let scorer = Bm25Scorer::with_defaults();
+    let query_terms: Vec<String> = if intent_mode {
+        collect_query_terms(intent_terms, &scorer)
+    } else {
+        scorer.tokenizer().tokenize(&parsed.raw)
+    };
+
+    let exact_term_set: HashSet<String> = if intent_mode {
+        intent_terms.exact_terms.iter().cloned().collect()
+    } else {
+        HashSet::new()
+    };
+    let expanded_term_set: HashSet<String> = if intent_mode {
+        intent_terms.expanded_terms.iter().cloned().collect()
+    } else {
+        HashSet::new()
+    };
+
+    if is_fast_path_expr(expr) {
+        return score_and_rank_fast(
+            candidates,
+            limit,
+            intent_mode,
+            intent_level,
+            &exact_term_set,
+            &expanded_term_set,
+            &query_terms,
+        );
+    }
+
+    let mut matches = Vec::new();
+
+    for candidate in candidates {
+        let content = match read_candidate_content(&candidate.file_path) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        if !evaluate_expr(expr, &content) {
+            continue;
+        }
+
+        let category_boost =
+            structural_boost::compute_category_boost(structural_boost::classify_file(&candidate.file_path));
+        let coverage_boost = structural_boost::compute_coverage_boost(&query_terms, &content);
+        let role_boost =
+            structural_boost::compute_role_boost(structural_boost::classify_role_from_content(&content));
+
+        let intent_boost = if intent_mode {
+            compute_intent_score(
+                &candidate.matched_terms,
+                &exact_term_set,
+                &expanded_term_set,
+                intent_level,
+            )
+        } else {
+            1.0
+        };
+
+        let boosted_score = candidate.score * category_boost * coverage_boost * role_boost * intent_boost;
+        let lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+        let (snippet, line_start, line_end) = extract_snippet(&lines, &candidate.matched_terms);
+
+        matches.push(TextSearchMatch {
+            file_path: candidate.file_path.clone(),
+            score: boosted_score,
+            matched_terms: candidate.matched_terms.clone(),
+            snippet,
+            snippet_line_start: line_start,
+            snippet_line_end: line_end,
+            language: candidate.language.clone(),
+        });
+    }
+
+    matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    matches.truncate(limit + 1);
+    matches
+}
+
+fn score_and_rank_fast(
+    candidates: &[IndexedCandidate],
+    limit: usize,
+    intent_mode: bool,
+    intent_level: u8,
+    exact_term_set: &HashSet<String>,
+    expanded_term_set: &HashSet<String>,
+    query_terms: &[String],
+) -> Vec<TextSearchMatch> {
+    let mut scored: Vec<(usize, f64)> = Vec::new();
+
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let category_boost =
+            structural_boost::compute_category_boost(structural_boost::classify_file(&candidate.file_path));
+        let coverage_boost = compute_matched_term_coverage_boost(&candidate.matched_terms, query_terms);
+        let intent_boost = if intent_mode {
+            compute_intent_score(
+                &candidate.matched_terms,
+                exact_term_set,
+                expanded_term_set,
+                intent_level,
+            )
+        } else {
+            1.0
+        };
+
+        scored.push((idx, candidate.score * category_boost * coverage_boost * intent_boost));
+    }
+
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+
+    let mut matches = Vec::new();
+    for (idx, score) in scored.into_iter().take(limit + 1) {
+        let candidate = &candidates[idx];
+        let content = match read_candidate_content(&candidate.file_path) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+        let (snippet, line_start, line_end) = extract_snippet(&lines, &candidate.matched_terms);
+
+        matches.push(TextSearchMatch {
+            file_path: candidate.file_path.clone(),
+            score,
+            matched_terms: candidate.matched_terms.clone(),
+            snippet,
+            snippet_line_start: line_start,
+            snippet_line_end: line_end,
+            language: candidate.language.clone(),
+        });
+    }
+
+    matches
+}
+
+fn is_fast_path_expr(expr: &QueryExpr) -> bool {
+    match expr {
+        QueryExpr::Term { excluded, exact, .. } => !*excluded && !*exact,
+        QueryExpr::And(_, _) => false,
+        QueryExpr::Or(left, right) => is_fast_path_expr(left) && is_fast_path_expr(right),
+    }
+}
+
+fn compute_matched_term_coverage_boost(matched_terms: &[String], query_terms: &[String]) -> f64 {
+    if query_terms.is_empty() {
+        return 1.0;
+    }
+
+    let query: HashSet<String> = query_terms.iter().map(|t| t.to_ascii_lowercase()).collect();
+    let matched: HashSet<String> = matched_terms.iter().map(|t| t.to_ascii_lowercase()).collect();
+
+    let overlap = query.iter().filter(|term| matched.contains(*term)).count();
+    if overlap == 0 {
+        return 1.0;
+    }
+
+    let ratio = overlap as f64 / query.len() as f64;
+    1.0 + (ratio * 0.22)
+}
+
+fn read_candidate_content(path: &str) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    if content.contains('\0') {
+        return None;
+    }
+    Some(content)
+}
+
+fn collect_query_terms(intent_terms: &IntentTerms, scorer: &Bm25Scorer) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+
+    for term in &intent_terms.exact_terms {
+        for token in scorer.tokenizer().tokenize(term) {
+            if seen.insert(token.clone()) {
+                terms.push(token);
+            }
+        }
+    }
+
+    for term in &intent_terms.expanded_terms {
+        for token in scorer.tokenizer().tokenize(term) {
+            if seen.insert(token.clone()) {
+                terms.push(token);
+            }
+        }
+    }
+
+    terms
+}
+
+fn build_bm25_query(raw_query: &str, intent_terms: &IntentTerms) -> String {
+    let mut query = raw_query.trim().to_string();
+    for term in &intent_terms.expanded_terms {
+        if !query.is_empty() {
+            query.push(' ');
+        }
+        query.push_str(term);
+    }
+    query
+}
+
+fn compute_intent_score(
+    matched_terms: &[String],
+    exact_term_set: &HashSet<String>,
+    expanded_term_set: &HashSet<String>,
+    intent_level: u8,
+) -> f64 {
+    if exact_term_set.is_empty() && expanded_term_set.is_empty() {
+        return 1.0;
+    }
+
+    let mut exact_hits = 0usize;
+    let mut expanded_hits = 0usize;
+
+    for term in matched_terms {
+        let lower = term.to_ascii_lowercase();
+        if exact_term_set.contains(&lower) {
+            exact_hits += 1;
+            continue;
+        }
+        if expanded_term_set.contains(&lower) {
+            expanded_hits += 1;
+        }
+    }
+
+    let exact_boost = if exact_hits > 0 {
+        1.0 + (exact_hits as f64 * 0.22)
+    } else {
+        1.0
+    };
+
+    let expanded_factor = match intent_level {
+        1 => 0.03,
+        2 => 0.045,
+        _ => 0.06,
+    };
+    let expanded_boost = 1.0 + (expanded_hits as f64 * expanded_factor);
+
+    let exact_coverage = if exact_term_set.is_empty() {
+        0.0
+    } else {
+        exact_hits as f64 / exact_term_set.len() as f64
+    };
+    let expanded_coverage = if expanded_term_set.is_empty() {
+        0.0
+    } else {
+        expanded_hits as f64 / expanded_term_set.len() as f64
+    };
+    let coverage_boost = 1.0 + (exact_coverage * 0.2) + (expanded_coverage * 0.08);
+
+    let penalty = if exact_hits == 0 && expanded_hits > 0 {
+        0.85
+    } else {
+        1.0
+    };
+
+    exact_boost * expanded_boost * coverage_boost * penalty
+}
+
+
+/// Evaluate a query expression tree against file content.
+///
+/// expr: &QueryExpr — Expression tree node to evaluate.
+/// content: &str — File content to match against.
+fn evaluate_expr(expr: &QueryExpr, content: &str) -> bool {
+    let content_lower = content.to_lowercase();
+
+    match expr {
+        QueryExpr::Term {
+            keywords,
+            required: _,
+            excluded,
+            exact,
+        } => {
+            let found = if *exact {
+                let phrase = keywords.join(" ");
+                content_lower.contains(&phrase)
+            } else {
+                keywords.iter().any(|kw| content_lower.contains(kw))
+            };
+
+            if *excluded {
+                !found
+            } else {
+                found
+            }
+        }
+        QueryExpr::And(left, right) => evaluate_expr(left, content) && evaluate_expr(right, content),
+        QueryExpr::Or(left, right) => evaluate_expr(left, content) || evaluate_expr(right, content),
+    }
+}
+
+
+/// Extract a context snippet around the first matched term in the file.
+///
+/// lines: &[String] — File lines.
+/// matched_terms: &[String] — Terms that matched in this file.
+fn extract_snippet(lines: &[String], matched_terms: &[String]) -> (String, usize, usize) {
+    if lines.is_empty() || matched_terms.is_empty() {
+        return (String::new(), 0, 0);
+    }
+
+    let mut best_line: Option<usize> = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_lower = line.to_lowercase();
+        for term in matched_terms {
+            if line_lower.contains(term) {
+                best_line = Some(i);
+                break;
+            }
+        }
+        if best_line.is_some() {
+            break;
+        }
+    }
+
+    let center = best_line.unwrap_or(0);
+    let start = center.saturating_sub(SNIPPET_CONTEXT_LINES);
+    let end = (center + SNIPPET_CONTEXT_LINES + 1).min(lines.len());
+
+    let snippet = lines[start..end].join("\n");
+    (snippet, start + 1, end)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_intent_score_prefers_exact_terms() {
+        let exact_term_set: HashSet<String> = ["auth".to_string(), "token".to_string()].into_iter().collect();
+        let expanded_term_set: HashSet<String> = ["authentication".to_string(), "jwt".to_string()].into_iter().collect();
+
+        let exact_terms = vec!["auth".to_string(), "token".to_string()];
+        let expanded_only_terms = vec!["authentication".to_string(), "jwt".to_string()];
+
+        let exact_score = compute_intent_score(&exact_terms, &exact_term_set, &expanded_term_set, 2);
+        let expanded_only_score = compute_intent_score(&expanded_only_terms, &exact_term_set, &expanded_term_set, 2);
+
+        assert!(exact_score > expanded_only_score);
+    }
+
+    #[test]
+    fn test_compute_intent_score_rewards_coverage_with_exact_hits() {
+        let exact_term_set: HashSet<String> = ["auth".to_string(), "token".to_string()].into_iter().collect();
+        let expanded_term_set: HashSet<String> = ["authentication".to_string(), "jwt".to_string()].into_iter().collect();
+
+        let partial_terms = vec!["auth".to_string()];
+        let high_coverage_terms = vec!["auth".to_string(), "token".to_string(), "authentication".to_string()];
+
+        let partial_score = compute_intent_score(&partial_terms, &exact_term_set, &expanded_term_set, 2);
+        let high_coverage_score = compute_intent_score(&high_coverage_terms, &exact_term_set, &expanded_term_set, 2);
+
+        assert!(high_coverage_score > partial_score);
+    }
+
+    #[test]
+    fn test_evaluate_expr_simple_term() {
+        let expr = QueryExpr::Term {
+            keywords: vec!["authentication".to_string()],
+            required: false,
+            excluded: false,
+            exact: false,
+        };
+        assert!(evaluate_expr(&expr, "user authentication handler"));
+        assert!(!evaluate_expr(&expr, "database connection pool"));
+    }
+
+    #[test]
+    fn test_evaluate_expr_excluded() {
+        let expr = QueryExpr::Term {
+            keywords: vec!["test".to_string()],
+            required: false,
+            excluded: true,
+            exact: false,
+        };
+        assert!(!evaluate_expr(&expr, "this is a test file"));
+        assert!(evaluate_expr(&expr, "production handler code"));
+    }
+
+    #[test]
+    fn test_evaluate_expr_exact_phrase() {
+        let expr = QueryExpr::Term {
+            keywords: vec!["exact".to_string(), "match".to_string()],
+            required: false,
+            excluded: false,
+            exact: true,
+        };
+        assert!(evaluate_expr(&expr, "find the exact match here"));
+        assert!(!evaluate_expr(&expr, "match the exact value"));
+    }
+
+    #[test]
+    fn test_evaluate_expr_and() {
+        let expr = QueryExpr::And(
+            Box::new(QueryExpr::Term {
+                keywords: vec!["auth".to_string()],
+                required: false,
+                excluded: false,
+                exact: false,
+            }),
+            Box::new(QueryExpr::Term {
+                keywords: vec!["token".to_string()],
+                required: false,
+                excluded: false,
+                exact: false,
+            }),
+        );
+        assert!(evaluate_expr(&expr, "auth token validation"));
+        assert!(!evaluate_expr(&expr, "auth handler only"));
+    }
+
+    #[test]
+    fn test_evaluate_expr_or() {
+        let expr = QueryExpr::Or(
+            Box::new(QueryExpr::Term {
+                keywords: vec!["auth".to_string()],
+                required: false,
+                excluded: false,
+                exact: false,
+            }),
+            Box::new(QueryExpr::Term {
+                keywords: vec!["token".to_string()],
+                required: false,
+                excluded: false,
+                exact: false,
+            }),
+        );
+        assert!(evaluate_expr(&expr, "auth handler"));
+        assert!(evaluate_expr(&expr, "token validator"));
+        assert!(!evaluate_expr(&expr, "database pool"));
+    }
+
+    #[test]
+    fn test_extract_snippet_basic() {
+        let lines: Vec<String> = vec![
+            "line 1".to_string(),
+            "line 2".to_string(),
+            "line 3 with auth".to_string(),
+            "line 4".to_string(),
+            "line 5".to_string(),
+        ];
+        let terms = vec!["auth".to_string()];
+        let (snippet, start, end) = extract_snippet(&lines, &terms);
+        assert!(snippet.contains("auth"));
+        assert!(start >= 1);
+        assert!(end <= 5);
+    }
+
+    #[test]
+    fn test_extract_snippet_empty() {
+        let lines: Vec<String> = Vec::new();
+        let terms = vec!["auth".to_string()];
+        let (snippet, start, end) = extract_snippet(&lines, &terms);
+        assert!(snippet.is_empty());
+        assert_eq!(start, 0);
+        assert_eq!(end, 0);
+    }
+}

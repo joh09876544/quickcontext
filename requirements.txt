@@ -1,0 +1,28 @@
+# ============================================================================
+# quickcontext — Local Code Context Engine
+# ============================================================================
+
+# --- Vector Database Client ------------------------------------------------
+qdrant-client==1.16.2
+
+# --- Embedding Generation (local, no API keys) -----------------------------
+fastembed==0.7.4
+
+# --- Multi-Provider LLM/Embedding Gateway ----------------------------------
+litellm==1.81.10
+
+# --- Tokenization (chunk size estimation) -----------------------------------
+tiktoken==0.12.0
+
+# --- Filesystem Monitoring (live re-indexing on file changes) ---------------
+watchdog==6.0.0
+
+# --- CLI Interface ----------------------------------------------------------
+click==8.3.1
+rich==14.3.2
+
+# --- Numerical Computing (embedding operations) ----------------------------
+numpy==2.4.2
+
+# --- HTTP Requests ---------------------------------------------------------
+requests==2.31.0
