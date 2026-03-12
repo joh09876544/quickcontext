@@ -1720,18 +1720,9 @@ class QuickContext:
                 total_tokens = sum(d.token_count for d in unique_descriptions)
                 print(f"Generated descriptions ({total_tokens} tokens, ${llm_cost:.4f})")
         else:
-            from engine.src.describer import ChunkDescription
+            from engine.src.describer import build_fallback_descriptions
 
-            unique_descriptions = [
-                ChunkDescription(
-                    chunk_id=chunk.chunk_id,
-                    description=f"{chunk.symbol_kind} {chunk.symbol_name}",
-                    keywords=[chunk.language, chunk.symbol_kind],
-                    token_count=0,
-                    cost_usd=0.0,
-                )
-                for chunk in dedup_result.unique_chunks
-            ]
+            unique_descriptions = build_fallback_descriptions(dedup_result.unique_chunks)
             descriptions = expand_descriptions(unique_descriptions, dedup_result)
             llm_cost = 0.0
             if show_progress:
@@ -2054,18 +2045,9 @@ class QuickContext:
                 total_tokens = sum(d.token_count for d in unique_descriptions)
                 print(f"Generated descriptions ({total_tokens} tokens, ${llm_cost:.4f})")
         else:
-            from engine.src.describer import ChunkDescription
+            from engine.src.describer import build_fallback_descriptions
 
-            unique_descriptions = [
-                ChunkDescription(
-                    chunk_id=chunk.chunk_id,
-                    description=f"{chunk.symbol_kind} {chunk.symbol_name}",
-                    keywords=[chunk.language, chunk.symbol_kind],
-                    token_count=0,
-                    cost_usd=0.0,
-                )
-                for chunk in dedup_result.unique_chunks
-            ]
+            unique_descriptions = build_fallback_descriptions(dedup_result.unique_chunks)
             descriptions = expand_descriptions(unique_descriptions, dedup_result)
             llm_cost = 0.0
             if show_progress:

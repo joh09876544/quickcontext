@@ -64,3 +64,24 @@ def keyword_overlap_score(query_keywords: list[str], chunk_keywords: list[str]) 
         return 0.0
 
     return overlap / max_possible
+
+
+def keyword_query_coverage_score(query_keywords: list[str], chunk_keywords: list[str]) -> float:
+    """
+    Calculate how much of the query vocabulary is covered by candidate keywords.
+
+    query_keywords: list[str] — Keywords extracted from the query.
+    chunk_keywords: list[str] — Candidate keywords from metadata or symbols.
+    Returns: float — Coverage score (0.0 to 1.0).
+    """
+    if not query_keywords or not chunk_keywords:
+        return 0.0
+
+    query_set = set(kw.lower() for kw in query_keywords)
+    chunk_set = set(kw.lower() for kw in chunk_keywords)
+
+    if not query_set:
+        return 0.0
+
+    overlap = len(query_set & chunk_set)
+    return overlap / len(query_set)

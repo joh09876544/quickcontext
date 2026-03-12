@@ -11,7 +11,11 @@ from typing import TYPE_CHECKING, Optional
 
 from qdrant_client import QdrantClient, models
 
-from engine.src.keywords import extract_keywords, keyword_overlap_score
+from engine.src.keywords import (
+    extract_keywords,
+    keyword_overlap_score,
+    keyword_query_coverage_score,
+)
 from engine.src.providers import EmbeddingProvider
 from engine.src.query_dsl import StructuredSubQuery
 
@@ -24,6 +28,7 @@ TOP_RANK_BONUS_1 = 0.05
 TOP_RANK_BONUS_2_3 = 0.02
 QUERY_CACHE_SIZE = 256
 DISK_QUERY_CACHE_LIMIT = 512
+METADATA_TOKEN_CACHE_SIZE = 2048
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +103,7 @@ class CodeSearcher:
         self._cache_lock = Lock()
         self._query_vector_cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
         self._keyword_cache: OrderedDict[str, list[str]] = OrderedDict()
+        self._metadata_token_cache: OrderedDict[str, list[str]] = OrderedDict()
 
     def search_code(
         self,
@@ -129,7 +135,8 @@ class CodeSearcher:
             list[SearchResult] — Results sorted by relevance.
         """
         query_vector = self._embed_query_cached(query, using="code")
-        query_keywords = self._extract_keywords_cached(query) if use_keywords else []
+        ranking_keywords = self._extract_keywords_cached(query)
+        blend_keywords = ranking_keywords if use_keywords else []
 
         return self._search(
             query=query,
@@ -140,7 +147,8 @@ class CodeSearcher:
             file_path=file_path,
             path_prefix=path_prefix,
             symbol_kind=symbol_kind,
-            query_keywords=query_keywords,
+            ranking_keywords=ranking_keywords,
+            blend_keywords=blend_keywords,
             keyword_weight=keyword_weight,
             rerank=rerank,
         )
@@ -175,7 +183,8 @@ class CodeSearcher:
             list[SearchResult] — Results sorted by relevance.
         """
         query_vector = self._embed_query_cached(query, using="description")
-        query_keywords = self._extract_keywords_cached(query) if use_keywords else []
+        ranking_keywords = self._extract_keywords_cached(query)
+        blend_keywords = ranking_keywords if use_keywords else []
 
         return self._search(
             query=query,
@@ -186,7 +195,8 @@ class CodeSearcher:
             file_path=file_path,
             path_prefix=path_prefix,
             symbol_kind=symbol_kind,
-            query_keywords=query_keywords,
+            ranking_keywords=ranking_keywords,
+            blend_keywords=blend_keywords,
             keyword_weight=keyword_weight,
             rerank=rerank,
         )
@@ -231,7 +241,8 @@ class CodeSearcher:
         Returns:
             list[SearchResult] — Results sorted by relevance.
         """
-        query_keywords = self._extract_keywords_cached(query) if use_keywords else []
+        ranking_keywords = self._extract_keywords_cached(query)
+        blend_keywords = ranking_keywords if use_keywords else []
         request_limit = max(limit * 3, 30)
 
         if self._can_share_query_embedding():
@@ -256,7 +267,8 @@ class CodeSearcher:
                     "file_path": file_path,
                     "path_prefix": path_prefix,
                     "symbol_kind": symbol_kind,
-                    "query_keywords": query_keywords,
+                    "ranking_keywords": ranking_keywords,
+                    "blend_keywords": blend_keywords,
                     "keyword_weight": keyword_weight,
                 },
                 {
@@ -268,7 +280,8 @@ class CodeSearcher:
                     "file_path": file_path,
                     "path_prefix": path_prefix,
                     "symbol_kind": symbol_kind,
-                    "query_keywords": query_keywords,
+                    "ranking_keywords": ranking_keywords,
+                    "blend_keywords": blend_keywords,
                     "keyword_weight": keyword_weight,
                 },
             ]
@@ -354,6 +367,9 @@ class CodeSearcher:
                 per_query_keyword_weight = keyword_weight
                 using = "description"
 
+            ranking_keywords = self._extract_keywords_cached(sub.text)
+            blend_keywords = ranking_keywords if use_keywords else []
+
             requests.append(
                 {
                     "query": sub.text,
@@ -364,7 +380,8 @@ class CodeSearcher:
                     "file_path": file_path,
                     "path_prefix": path_prefix,
                     "symbol_kind": symbol_kind,
-                    "query_keywords": self._extract_keywords_cached(sub.text) if use_keywords else [],
+                    "ranking_keywords": ranking_keywords,
+                    "blend_keywords": blend_keywords,
                     "keyword_weight": per_query_keyword_weight,
                 }
             )
@@ -540,7 +557,8 @@ class CodeSearcher:
         file_path: Optional[str],
         path_prefix: Optional[str],
         symbol_kind: Optional[str],
-        query_keywords: list[str],
+        ranking_keywords: list[str],
+        blend_keywords: list[str],
         keyword_weight: float,
         rerank: bool = False,
     ) -> list[SearchResult]:
@@ -556,7 +574,8 @@ class CodeSearcher:
             file_path: Optional[str] — Filter by file path (exact match).
             path_prefix: Optional[str] — Filter by file path prefix.
             symbol_kind: Optional[str] — Filter by symbol type.
-            query_keywords: list[str] — Extracted keywords from query.
+            ranking_keywords: list[str] — Extracted keywords used for lexical reranking.
+            blend_keywords: list[str] — Query keywords used for payload keyword blending.
             keyword_weight: float — Weight for keyword overlap score.
             rerank: bool — Enable ColBERT reranking.
 
@@ -613,7 +632,7 @@ class CodeSearcher:
         rerank_active = rerank and self._reranker is not None
         if rerank_active:
             fetch_limit = limit * 5
-        elif query_keywords:
+        elif ranking_keywords:
             fetch_limit = limit * 3
         else:
             fetch_limit = limit
@@ -654,46 +673,52 @@ class CodeSearcher:
             chunk_keywords = point.payload.get("keywords", [])
             path_context = point.payload.get("path_context")
 
-            if query_keywords and chunk_keywords:
-                kw_score = keyword_overlap_score(query_keywords, chunk_keywords)
+            if blend_keywords and chunk_keywords:
+                kw_score = keyword_overlap_score(blend_keywords, chunk_keywords)
                 final_score = vector_score * (1 - keyword_weight) + kw_score * keyword_weight
             else:
                 final_score = vector_score
 
-            if path_context and query_keywords:
+            if path_context and ranking_keywords:
                 path_keywords = extract_keywords(path_context)
                 if path_keywords:
-                    final_score += keyword_overlap_score(query_keywords, path_keywords) * 0.1
+                    final_score += keyword_query_coverage_score(ranking_keywords, path_keywords) * 0.1
 
             symbol_kind_value = point.payload.get("symbol_kind") or point.payload.get("symbol_type") or "unknown"
             symbol_name_value = point.payload["symbol_name"]
             file_path_value = point.payload["file_path"]
-            final_score *= self._kind_score_multiplier(symbol_kind_value, len(query_keywords))
-            final_score *= self._path_signal_multiplier(file_path_value, len(query_keywords))
+            final_score *= self._kind_score_multiplier(symbol_kind_value, len(ranking_keywords))
+            final_score *= self._path_signal_multiplier(file_path_value, ranking_keywords)
 
-            if query_keywords:
+            if ranking_keywords:
                 symbol_tokens = self._symbol_tokens(
                     symbol_name_value,
                     point.payload.get("signature"),
                 )
-                symbol_overlap = keyword_overlap_score(query_keywords, symbol_tokens)
+                symbol_overlap = keyword_query_coverage_score(ranking_keywords, symbol_tokens)
                 final_score += symbol_overlap * 0.18
-                if len(query_keywords) >= 2 and symbol_overlap >= 0.5:
+                if len(ranking_keywords) >= 2 and symbol_overlap >= 0.5:
                     final_score *= 1.12
                 if (
-                    len(query_keywords) >= 2
+                    len(ranking_keywords) >= 2
                     and symbol_overlap < 0.5
                     and symbol_kind_value.lower() in {"data_key", "variable", "property", "import"}
                 ):
                     final_score *= 0.7
 
-            if query_keywords:
-                generic_symbol_names = {"main", "entry", "_start"}
+            if ranking_keywords:
+                metadata_tokens = self._metadata_tokens(point.payload)
+                metadata_overlap = keyword_query_coverage_score(ranking_keywords, metadata_tokens)
+                final_score += metadata_overlap * 0.16
+                if len(ranking_keywords) >= 3 and metadata_overlap >= 0.45:
+                    final_score *= 1.08
+
+                generic_symbol_names = {"main", "entry", "_start", "init"}
                 normalized_symbol_name = symbol_name_value.lower()
                 if (
-                    len(query_keywords) > 1
+                    len(ranking_keywords) > 1
                     and normalized_symbol_name in generic_symbol_names
-                    and all(term not in normalized_symbol_name for term in query_keywords)
+                    and all(term not in normalized_symbol_name for term in ranking_keywords)
                 ):
                     final_score *= 0.92
             if normalized_path_prefix:
@@ -747,7 +772,7 @@ class CodeSearcher:
                 file_path=request["file_path"],
                 path_prefix=request["path_prefix"],
                 symbol_kind=request["symbol_kind"],
-                query_keywords=request["query_keywords"],
+                ranking_keywords=request["ranking_keywords"],
                 rerank=False,
             )
             query_requests.append(
@@ -761,7 +786,8 @@ class CodeSearcher:
             )
             contexts.append(
                 {
-                    "query_keywords": request["query_keywords"],
+                    "ranking_keywords": request["ranking_keywords"],
+                    "blend_keywords": request["blend_keywords"],
                     "keyword_weight": request["keyword_weight"],
                     "normalized_path_prefix": normalized_path_prefix,
                     "query_vector": request["query_vector"],
@@ -779,7 +805,8 @@ class CodeSearcher:
         for request, response, context in zip(requests, responses, contexts):
             results = self._points_to_results(
                 points=response.points,
-                query_keywords=context["query_keywords"],
+                ranking_keywords=context["ranking_keywords"],
+                blend_keywords=context["blend_keywords"],
                 keyword_weight=context["keyword_weight"],
                 normalized_path_prefix=context["normalized_path_prefix"],
             )
@@ -799,7 +826,8 @@ class CodeSearcher:
                 )
                 results = self._points_to_results(
                     points=fallback_response.points,
-                    query_keywords=context["query_keywords"],
+                    ranking_keywords=context["ranking_keywords"],
+                    blend_keywords=context["blend_keywords"],
                     keyword_weight=context["keyword_weight"],
                     normalized_path_prefix=context["normalized_path_prefix"],
                 )
@@ -814,7 +842,7 @@ class CodeSearcher:
         file_path: Optional[str],
         path_prefix: Optional[str],
         symbol_kind: Optional[str],
-        query_keywords: list[str],
+        ranking_keywords: list[str],
         rerank: bool,
     ) -> tuple[Optional[models.Filter], Optional[str], int]:
         """
@@ -872,7 +900,7 @@ class CodeSearcher:
         rerank_active = rerank and self._reranker is not None
         if rerank_active:
             fetch_limit = limit * 5
-        elif query_keywords:
+        elif ranking_keywords:
             fetch_limit = limit * 3
         else:
             fetch_limit = limit
@@ -897,7 +925,7 @@ class CodeSearcher:
             file_path=file_path,
             path_prefix=None,
             symbol_kind=symbol_kind,
-            query_keywords=[],
+            ranking_keywords=[],
             rerank=False,
         )
         return query_filter
@@ -905,7 +933,8 @@ class CodeSearcher:
     def _points_to_results(
         self,
         points,
-        query_keywords: list[str],
+        ranking_keywords: list[str],
+        blend_keywords: list[str],
         keyword_weight: float,
         normalized_path_prefix: Optional[str],
     ) -> list[SearchResult]:
@@ -918,45 +947,51 @@ class CodeSearcher:
             chunk_keywords = point.payload.get("keywords", [])
             path_context = point.payload.get("path_context")
 
-            if query_keywords and chunk_keywords:
-                kw_score = keyword_overlap_score(query_keywords, chunk_keywords)
+            if blend_keywords and chunk_keywords:
+                kw_score = keyword_overlap_score(blend_keywords, chunk_keywords)
                 final_score = vector_score * (1 - keyword_weight) + kw_score * keyword_weight
             else:
                 final_score = vector_score
 
-            if path_context and query_keywords:
+            if path_context and ranking_keywords:
                 path_keywords = extract_keywords(path_context)
                 if path_keywords:
-                    final_score += keyword_overlap_score(query_keywords, path_keywords) * 0.1
+                    final_score += keyword_query_coverage_score(ranking_keywords, path_keywords) * 0.1
 
             symbol_kind_value = point.payload.get("symbol_kind") or point.payload.get("symbol_type") or "unknown"
             symbol_name_value = point.payload["symbol_name"]
             file_path_value = point.payload["file_path"]
-            final_score *= self._kind_score_multiplier(symbol_kind_value, len(query_keywords))
-            final_score *= self._path_signal_multiplier(file_path_value, len(query_keywords))
+            final_score *= self._kind_score_multiplier(symbol_kind_value, len(ranking_keywords))
+            final_score *= self._path_signal_multiplier(file_path_value, ranking_keywords)
 
-            if query_keywords:
+            if ranking_keywords:
                 symbol_tokens = self._symbol_tokens(
                     symbol_name_value,
                     point.payload.get("signature"),
                 )
-                symbol_overlap = keyword_overlap_score(query_keywords, symbol_tokens)
+                symbol_overlap = keyword_query_coverage_score(ranking_keywords, symbol_tokens)
                 final_score += symbol_overlap * 0.18
-                if len(query_keywords) >= 2 and symbol_overlap >= 0.5:
+                if len(ranking_keywords) >= 2 and symbol_overlap >= 0.5:
                     final_score *= 1.12
                 if (
-                    len(query_keywords) >= 2
+                    len(ranking_keywords) >= 2
                     and symbol_overlap < 0.5
                     and symbol_kind_value.lower() in {"data_key", "variable", "property", "import"}
                 ):
                     final_score *= 0.7
 
-                generic_symbol_names = {"main", "entry", "_start"}
+                metadata_tokens = self._metadata_tokens(point.payload)
+                metadata_overlap = keyword_query_coverage_score(ranking_keywords, metadata_tokens)
+                final_score += metadata_overlap * 0.16
+                if len(ranking_keywords) >= 3 and metadata_overlap >= 0.45:
+                    final_score *= 1.08
+
+                generic_symbol_names = {"main", "entry", "_start", "init"}
                 normalized_symbol_name = symbol_name_value.lower()
                 if (
-                    len(query_keywords) > 1
+                    len(ranking_keywords) > 1
                     and normalized_symbol_name in generic_symbol_names
-                    and all(term not in normalized_symbol_name for term in query_keywords)
+                    and all(term not in normalized_symbol_name for term in ranking_keywords)
                 ):
                     final_score *= 0.92
             if normalized_path_prefix:
@@ -1136,7 +1171,7 @@ class CodeSearcher:
             return 0.8
         return 1.0
 
-    def _path_signal_multiplier(self, file_path: str, query_keyword_count: int) -> float:
+    def _path_signal_multiplier(self, file_path: str, query_keywords: list[str]) -> float:
         """
         Apply a small penalty to lower-signal config/data files for multi-term queries.
 
@@ -1144,10 +1179,25 @@ class CodeSearcher:
         query_keyword_count: int — Number of extracted query keywords.
         Returns: float — Score multiplier.
         """
+        query_keyword_count = len(query_keywords)
         if query_keyword_count < 2:
             return 1.0
 
         normalized = file_path.replace("\\", "/").lower()
+        query_terms = {term.lower() for term in query_keywords}
+        if (
+            not query_terms.intersection({"test", "tests", "testing", "regression"})
+            and (
+                "/test/" in normalized
+                or "/tests/" in normalized
+                or normalized.endswith("_test.py")
+                or normalized.endswith("test_regressions.py")
+                or normalized.startswith("test/")
+                or normalized.startswith("tests/")
+            )
+        ):
+            return 0.78
+
         low_signal_suffixes = (
             ".yml",
             ".yaml",
@@ -1161,6 +1211,132 @@ class CodeSearcher:
             return 0.82
         return 1.0
 
+    def _payload_cache_key(self, payload: dict) -> str:
+        """
+        Build a stable cache key for payload-derived lexical metadata.
+        """
+        chunk_id = payload.get("chunk_id")
+        if chunk_id:
+            return str(chunk_id)
+
+        parent = payload.get("parent")
+        parent_str = f":{parent}" if parent else ""
+        symbol_kind = payload.get("symbol_kind") or payload.get("symbol_type") or "unknown"
+        return (
+            f"{payload.get('file_path', '')}:{symbol_kind}:"
+            f"{payload.get('symbol_name', '')}{parent_str}:{payload.get('line_start', 0)}"
+        )
+
+    def _token_variants(self, token: str) -> list[str]:
+        """
+        Expand a token with lightweight inflection variants for ranking.
+        """
+        token = token.lower()
+        variants = [token]
+
+        if len(token) > 4 and token.endswith("ies"):
+            variants.append(token[:-3] + "y")
+        elif len(token) > 4 and token.endswith("ing"):
+            stem = token[:-3]
+            variants.append(stem)
+            if len(stem) >= 2 and stem[-1] == stem[-2]:
+                variants.append(stem[:-1])
+        elif len(token) > 4 and token.endswith("ed"):
+            stem = token[:-2]
+            variants.append(stem)
+            if not stem.endswith("e"):
+                variants.append(token[:-1])
+        elif len(token) > 4 and token.endswith(("ches", "shes", "xes", "zes", "sses")):
+            variants.append(token[:-2])
+        elif len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+            variants.append(token[:-1])
+
+        seen: set[str] = set()
+        out: list[str] = []
+        for candidate in variants:
+            if len(candidate) < 3 or candidate in seen:
+                continue
+            seen.add(candidate)
+            out.append(candidate)
+        return out
+
+    def _identifier_tokens(self, text: str, max_tokens: Optional[int] = None) -> list[str]:
+        """
+        Tokenize identifier-like text, including snake_case and path segments.
+        """
+        if not text:
+            return []
+
+        expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+        expanded = re.sub(r"[\\/.\-:()\\[\\],]", " ", expanded)
+        raw_tokens = re.findall(r"[A-Za-z0-9_]+", expanded)
+
+        seen: set[str] = set()
+        out: list[str] = []
+        for raw_token in raw_tokens:
+            for part in raw_token.split("_"):
+                lower = part.lower().strip()
+                if len(lower) < 3:
+                    continue
+                for candidate in self._token_variants(lower):
+                    if candidate in seen:
+                        continue
+                    seen.add(candidate)
+                    out.append(candidate)
+                    if max_tokens is not None and len(out) >= max_tokens:
+                        return out
+
+        return out
+
+    def _metadata_tokens(self, payload: dict) -> list[str]:
+        """
+        Build cached lexical ranking tokens from payload metadata.
+        """
+        cache_key = self._payload_cache_key(payload)
+        with self._cache_lock:
+            cached = self._metadata_token_cache.get(cache_key)
+            if cached is not None:
+                self._metadata_token_cache.move_to_end(cache_key)
+                return cached
+
+        tokens: list[str] = []
+        tokens.extend(self._identifier_tokens(payload.get("file_path", ""), max_tokens=12))
+        tokens.extend(self._identifier_tokens(payload.get("path_context", ""), max_tokens=12))
+        tokens.extend(self._identifier_tokens(payload.get("symbol_name", ""), max_tokens=8))
+        tokens.extend(self._identifier_tokens(payload.get("symbol_kind", ""), max_tokens=4))
+        tokens.extend(self._identifier_tokens(payload.get("parent", ""), max_tokens=8))
+        tokens.extend(self._identifier_tokens(payload.get("signature", ""), max_tokens=12))
+
+        for keyword in payload.get("keywords", []) or []:
+            tokens.extend(self._token_variants(str(keyword)))
+
+        free_text_parts = [
+            payload.get("description", ""),
+            payload.get("docstring", ""),
+        ]
+        free_text = "\n".join(part for part in free_text_parts if part)
+        if free_text:
+            for token in extract_keywords(free_text, max_keywords=20):
+                tokens.extend(self._token_variants(token))
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for token in tokens:
+            if token in seen:
+                continue
+            seen.add(token)
+            deduped.append(token)
+            if len(deduped) >= 48:
+                break
+
+        with self._cache_lock:
+            self._metadata_token_cache[cache_key] = deduped
+            self._metadata_token_cache.move_to_end(cache_key)
+            while len(self._metadata_token_cache) > METADATA_TOKEN_CACHE_SIZE:
+                self._metadata_token_cache.popitem(last=False)
+
+        return deduped
+
     def _symbol_tokens(self, symbol_name: str, signature: Optional[str]) -> list[str]:
         """
         Extract normalized tokens from symbol metadata for direct overlap scoring.
@@ -1170,17 +1346,7 @@ class CodeSearcher:
         Returns: list[str] — Lowercase deduplicated tokens.
         """
         raw = f"{symbol_name} {signature or ''}"
-        expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", raw)
-        tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expanded)
-        seen: set[str] = set()
-        out: list[str] = []
-        for token in tokens:
-            lower = token.lower()
-            if len(lower) < 2 or lower in seen:
-                continue
-            seen.add(lower)
-            out.append(lower)
-        return out
+        return self._identifier_tokens(raw, max_tokens=24)
 
     def _embed_query_cached(self, query: str, using: str) -> list[float]:
         """
@@ -1221,7 +1387,18 @@ class CodeSearcher:
                 self._keyword_cache.move_to_end(query)
                 return cached
 
-        keywords = extract_keywords(query)
+        keywords: list[str] = []
+        seen: set[str] = set()
+        for token in extract_keywords(query, max_keywords=12):
+            for candidate in self._token_variants(token):
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                keywords.append(candidate)
+                if len(keywords) >= 16:
+                    break
+            if len(keywords) >= 16:
+                break
 
         with self._cache_lock:
             self._keyword_cache[query] = keywords

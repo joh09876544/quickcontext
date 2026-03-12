@@ -9,6 +9,7 @@ import builtins
 
 from engine.src.chunker import ChunkBuilder, CodeChunk
 from engine.src.dedup import deduplicate_chunks
+from engine.src.describer import build_fallback_description
 from engine.src.filecache import FileSignatureCache
 from engine.src.searcher import CodeSearcher
 
@@ -49,6 +50,28 @@ class _FakeProvider:
     def embed_single(self, text: str):
         import numpy as np
         return np.array([0.1, 0.2], dtype=np.float32)
+
+
+class _FakePoint:
+    def __init__(self, score: float, payload: dict):
+        self.score = score
+        self.payload = payload
+
+
+class _FakeQueryResponse:
+    def __init__(self, points: list[_FakePoint]):
+        self.points = points
+
+
+class _FakeClient:
+    def __init__(self, points: list[_FakePoint]):
+        self._points = points
+
+    def query_points(self, **kwargs):
+        return _FakeQueryResponse(self._points)
+
+    def query_batch_points(self, collection_name, requests):
+        return [_FakeQueryResponse(self._points) for _ in requests]
 
 
 class _BlockedImport:
@@ -209,7 +232,7 @@ class RegressionTests(unittest.TestCase):
             file_path=None,
             path_prefix="engine/src",
             symbol_kind=None,
-            query_keywords=["engine", "src"],
+            ranking_keywords=["engine", "src"],
             rerank=False,
         )
         self.assertEqual(normalized_prefix, "engine/src")
@@ -217,6 +240,107 @@ class RegressionTests(unittest.TestCase):
         self.assertIsNotNone(query_filter)
         must_conditions = query_filter.must or []
         self.assertTrue(any(getattr(cond, "key", None) == "path_prefixes" for cond in must_conditions))
+
+    def test_symbol_tokens_split_snake_case_identifiers(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        tokens = searcher._symbol_tokens("_embed_query_with_provider_cached", None)
+        self.assertIn("embed", tokens)
+        self.assertIn("query", tokens)
+        self.assertIn("provider", tokens)
+        self.assertIn("cached", tokens)
+
+    def test_non_test_query_penalizes_test_paths(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        penalty = searcher._path_signal_multiplier(
+            str(Path("engine/tests/test_regressions.py").resolve()),
+            ["parser", "python", "commands"],
+        )
+        no_penalty = searcher._path_signal_multiplier(
+            str(Path("engine/tests/test_regressions.py").resolve()),
+            ["test", "regression", "imports"],
+        )
+        self.assertLess(penalty, 1.0)
+        self.assertEqual(no_penalty, 1.0)
+
+    def test_default_search_promotes_metadata_match_for_architecture_query(self) -> None:
+        general_payload = {
+            "file_path": str(Path("engine/__init__.py").resolve()),
+            "symbol_name": "semantic_search",
+            "symbol_kind": "function",
+            "line_start": 1,
+            "line_end": 20,
+            "source": "def semantic_search(...): ...",
+            "description": "Run semantic search over indexed code vectors.",
+            "keywords": ["semantic", "search", "project"],
+            "path_context": "engine / __init__.py",
+        }
+        relevant_payload = {
+            "file_path": str(Path("engine/src/searcher.py").resolve()),
+            "symbol_name": "_embed_query_with_provider_cached",
+            "symbol_kind": "function",
+            "line_start": 300,
+            "line_end": 360,
+            "source": "def _embed_query_with_provider_cached(...): ...",
+            "description": "Cache query embedding vectors in memory and on disk for repeated searches.",
+            "keywords": ["query", "embedding", "cache", "search"],
+            "path_context": "engine / src / searcher.py",
+            "signature": "_embed_query_with_provider_cached(query, provider, cache_key)",
+        }
+
+        client = _FakeClient(
+            [
+                _FakePoint(0.71, general_payload),
+                _FakePoint(0.62, relevant_payload),
+            ]
+        )
+        searcher = CodeSearcher(
+            client=client,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+
+        results = searcher.search_code(
+            query="How are query embeddings cached or reused in the search layer for repeated searches?",
+            limit=2,
+            use_keywords=False,
+        )
+        self.assertEqual(results[0].file_path.replace("\\", "/"), relevant_payload["file_path"].replace("\\", "/"))
+
+    def test_fallback_description_uses_docstring_and_path_context(self) -> None:
+        chunk = CodeChunk(
+            chunk_id="chunk-1",
+            source="def _embed_query_with_provider_cached(query, provider, cache_key): ...",
+            language="python",
+            file_path=str(Path("engine/src/searcher.py").resolve()),
+            symbol_name="_embed_query_with_provider_cached",
+            symbol_kind="function",
+            line_start=1,
+            line_end=5,
+            byte_start=0,
+            byte_end=64,
+            signature="_embed_query_with_provider_cached(query, provider, cache_key)",
+            docstring="Cache query embedding vectors in memory and on disk for repeated searches.",
+            parent="CodeSearcher",
+            visibility=None,
+            file_hash="hash",
+        )
+
+        description = build_fallback_description(chunk)
+        self.assertIn("Cache query embedding vectors", description.description)
+        self.assertIn("engine/src/searcher.py", description.description.replace("\\", "/"))
+        self.assertIn("query", description.keywords)
+        self.assertIn("searcher", description.keywords)
 
 
 class LazyImportBoundaryTests(unittest.TestCase):

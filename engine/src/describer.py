@@ -1,7 +1,9 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 import json
 import asyncio
+import re
 
 from engine.src.chunker import CodeChunk
 
@@ -39,6 +41,103 @@ class ChunkDescription:
     keywords: list[str]
     token_count: int
     cost_usd: float = 0.0
+
+
+def _split_identifier_tokens(text: str, max_tokens: int = 10) -> list[str]:
+    """
+    Split symbol and path text into lowercase keyword tokens.
+    """
+    if not text:
+        return []
+
+    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    expanded = re.sub(r"[\\/.\-:()\[\],]", " ", expanded)
+    raw_tokens = re.findall(r"[A-Za-z0-9_]+", expanded)
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw_token in raw_tokens:
+        for part in raw_token.split("_"):
+            lower = part.lower().strip()
+            if len(lower) < 3 or lower in seen:
+                continue
+            seen.add(lower)
+            out.append(lower)
+            if len(out) >= max_tokens:
+                return out
+
+    return out
+
+
+def _docstring_summary(docstring: Optional[str]) -> str:
+    """
+    Extract the first sentence-like summary from a docstring.
+    """
+    if not docstring:
+        return ""
+
+    cleaned = " ".join(docstring.strip().split())
+    if not cleaned:
+        return ""
+
+    sentence, _, _ = cleaned.partition(". ")
+    summary = sentence.strip()
+    if summary and not summary.endswith("."):
+        summary += "."
+    return summary[:220]
+
+
+def build_fallback_description(chunk: CodeChunk) -> ChunkDescription:
+    """
+    Build a lightweight local description and keywords without LLM calls.
+    """
+    path_tail = "/".join(Path(chunk.file_path).parts[-3:])
+    docstring_summary = _docstring_summary(chunk.docstring)
+
+    if docstring_summary:
+        description = docstring_summary
+        if path_tail:
+            description = f"{description} Defined in {path_tail}."
+    else:
+        subject = f"{chunk.language} {chunk.symbol_kind} {chunk.symbol_name}"
+        if chunk.parent:
+            subject += f" in {chunk.parent}"
+        description = subject
+        if chunk.signature:
+            description += f" with signature {chunk.signature}"
+        if path_tail:
+            description += f" from {path_tail}"
+        description += "."
+
+    keywords: list[str] = []
+    for token in [
+        chunk.language,
+        chunk.symbol_kind,
+        *_split_identifier_tokens(chunk.symbol_name, max_tokens=5),
+        *_split_identifier_tokens(chunk.parent or "", max_tokens=4),
+        *_split_identifier_tokens(chunk.signature or "", max_tokens=6),
+        *_split_identifier_tokens(path_tail, max_tokens=6),
+    ]:
+        if not token or token in keywords:
+            continue
+        keywords.append(token)
+        if len(keywords) >= 10:
+            break
+
+    return ChunkDescription(
+        chunk_id=chunk.chunk_id,
+        description=description,
+        keywords=keywords,
+        token_count=0,
+        cost_usd=0.0,
+    )
+
+
+def build_fallback_descriptions(chunks: list[CodeChunk]) -> list[ChunkDescription]:
+    """
+    Build fallback descriptions for a batch of chunks.
+    """
+    return [build_fallback_description(chunk) for chunk in chunks]
 
 
 class DescriptionGenerator:
@@ -120,21 +219,8 @@ class DescriptionGenerator:
                 keywords=parsed["keywords"],
                 token_count=token_count,
             )
-        except Exception as e:
-            fallback_desc = f"{chunk.symbol_kind} {chunk.symbol_name}"
-            if chunk.docstring:
-                fallback_desc = chunk.docstring[:200]
-
-            fallback_keywords = [chunk.language, chunk.symbol_kind]
-            if chunk.parent:
-                fallback_keywords.append(chunk.parent)
-
-            return ChunkDescription(
-                chunk_id=chunk.chunk_id,
-                description=fallback_desc,
-                keywords=fallback_keywords,
-                token_count=0,
-            )
+        except Exception:
+            return build_fallback_description(chunk)
 
     def generate_batch(self, chunks: list[CodeChunk], batch_size: int = 10) -> list[ChunkDescription]:
         """
@@ -213,22 +299,8 @@ class DescriptionGenerator:
                     token_count=token_count,
                     cost_usd=cost,
                 )
-            except Exception as e:
-                fallback_desc = f"{chunk.symbol_kind} {chunk.symbol_name}"
-                if chunk.docstring:
-                    fallback_desc = chunk.docstring[:200]
-
-                fallback_keywords = [chunk.language, chunk.symbol_kind]
-                if chunk.parent:
-                    fallback_keywords.append(chunk.parent)
-
-                return ChunkDescription(
-                    chunk_id=chunk.chunk_id,
-                    description=fallback_desc,
-                    keywords=fallback_keywords,
-                    token_count=0,
-                    cost_usd=0.0,
-                )
+            except Exception:
+                return build_fallback_description(chunk)
 
     def _system_prompt(self) -> str:
         """

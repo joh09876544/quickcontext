@@ -284,6 +284,9 @@ BENCHMARK_LOCAL.md
 .quickcontext/
 .quickcontext.json
 quickcontext.json
+!scripts/
+scripts/*
+!scripts/retrieval_benchmark.py
 quickcontext.local.json
 deepwiki_util/
 openrouter/
