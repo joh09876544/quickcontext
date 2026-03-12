@@ -1202,7 +1202,7 @@ class PipeClient:
         launches it as a background process and waits for connection.
         """
         try:
-            self.connect(timeout_ms=500)
+            self.connect(timeout_ms=100)
             return
         except PipeConnectionError:
             pass

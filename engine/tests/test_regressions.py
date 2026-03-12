@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import builtins
 
+from engine.__main__ import _find_command
 from engine.src.chunker import ChunkBuilder, CodeChunk
 from engine.src.config import EngineConfig, QdrantConfig
 from engine.src.dedup import deduplicate_chunks
@@ -107,6 +108,10 @@ class _BlockedImport:
 
 
 class RegressionTests(unittest.TestCase):
+    def test_find_command_skips_global_config_option(self) -> None:
+        command = _find_command(["--config", "quickcontext.json", "symbol-lookup", "CollectionManager"])
+        self.assertEqual(command, "symbol-lookup")
+
     def test_chunk_ids_differ_for_overloaded_like_symbols(self) -> None:
         builder = ChunkBuilder()
         file_path = str(Path("sample.py").resolve())
