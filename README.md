@@ -12,7 +12,7 @@ It currently has two main parts:
 The SDK now also includes a graph-aware context helper:
 
 - `QuickContext.semantic_search_bundle(...)`
-  Returns semantic anchors plus related import-graph files and caller context for deeper codebase exploration.
+  Returns semantic anchors plus distinct semantic neighbor files, related import-graph files, and caller context for deeper codebase exploration.
 
 ## Status
 

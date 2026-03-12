@@ -988,6 +988,31 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(related[0]["symbol"], "build_chunks")
         self.assertEqual(related[0]["caller_name"], "index_directory")
 
+    def test_split_semantic_bundle_results_moves_extra_distinct_files_to_related(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            results = [
+                SearchResult(0.9, "a.py", "one", "function", 1, 1, "", ""),
+                SearchResult(0.8, "a.py", "two", "function", 2, 2, "", ""),
+                SearchResult(0.7, "b.py", "three", "function", 1, 1, "", ""),
+                SearchResult(0.6, "c.py", "four", "function", 1, 1, "", ""),
+            ]
+            anchors, related = qc._split_semantic_bundle_results(results, anchor_limit=2, related_file_limit=3)
+        finally:
+            qc.close()
+
+        self.assertEqual([item.file_path for item in anchors], ["a.py", "b.py"])
+        self.assertEqual([item["file_path"] for item in related], ["c.py"])
+        self.assertEqual(related[0]["relations"][0]["relation"], "semantic_neighbor")
+
     def test_search_hydrates_final_results_after_lightweight_query(self) -> None:
         payload = {
             "file_path": str(Path("engine/src/searcher.py").resolve()),

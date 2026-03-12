@@ -1263,7 +1263,7 @@ class QuickContext:
         results = self.semantic_search(
             query=query,
             mode=mode,
-            limit=limit,
+            limit=max(limit, 1) * 4,
             language=language,
             path_prefix=path_prefix,
             project_name=project,
@@ -1271,19 +1271,24 @@ class QuickContext:
             keyword_weight=keyword_weight,
             rerank=rerank,
         )
+        anchors, semantic_neighbors = self._split_semantic_bundle_results(
+            results=results,
+            anchor_limit=limit,
+            related_file_limit=related_file_limit,
+        )
 
         related = self._related_files_for_results(
-            results=results,
+            results=anchors,
             related_seed_files=related_seed_files,
-            related_file_limit=related_file_limit,
+            related_file_limit=max(0, related_file_limit - len(semantic_neighbors)),
         )
         related_callers = self._related_callers_for_results(results)
 
         return {
             "query": query,
             "project_name": project,
-            "results": results,
-            "related_files": related,
+            "results": anchors,
+            "related_files": semantic_neighbors + related,
             "related_callers": related_callers,
         }
 
@@ -1461,6 +1466,51 @@ class QuickContext:
                     "line": edge.line,
                 }
             )
+
+    def _split_semantic_bundle_results(
+        self,
+        results: list,
+        anchor_limit: int,
+        related_file_limit: int,
+    ) -> tuple[list, list[dict]]:
+        """
+        Keep top semantic anchors while surfacing additional distinct semantic files as related context.
+        """
+        anchors: list = []
+        semantic_neighbors: list[dict] = []
+        seen_paths: set[str] = set()
+        seed_file: str | None = results[0].file_path if results else None
+
+        for item in results:
+            file_path = str(item.file_path)
+            if file_path in seen_paths:
+                continue
+            seen_paths.add(file_path)
+
+            if len(anchors) < anchor_limit:
+                anchors.append(item)
+                continue
+
+            if len(semantic_neighbors) >= related_file_limit:
+                break
+
+            semantic_neighbors.append(
+                {
+                    "file_path": file_path,
+                    "distance": 1,
+                    "relations": [
+                        {
+                            "relation": "semantic_neighbor",
+                            "seed_file": seed_file,
+                            "module_path": "",
+                            "language": getattr(item, "language", None),
+                            "line": getattr(item, "line_start", 0),
+                        }
+                    ],
+                }
+            )
+
+        return anchors, semantic_neighbors
 
     def _related_callers_for_results(self, results: list) -> list[dict]:
         """

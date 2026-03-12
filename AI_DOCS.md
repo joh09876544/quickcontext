@@ -81,7 +81,7 @@ Useful SDK retrieval primitives:
 
 - `QuickContext.semantic_search(...)`: main semantic retrieval path
 - `QuickContext.structured_search(...)`: typed multi-query retrieval
-- `QuickContext.semantic_search_bundle(...)`: semantic anchors plus related import-graph files and caller context for deeper follow-up exploration
+- `QuickContext.semantic_search_bundle(...)`: semantic anchors plus distinct semantic neighbor files, related import-graph files, and caller context for deeper follow-up exploration
 
 ## Important Rust Modules
 
