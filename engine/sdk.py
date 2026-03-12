@@ -1253,6 +1253,7 @@ class QuickContext:
         rerank: bool = False,
         related_seed_files: int = 1,
         related_file_limit: int = 8,
+        include_graph_related: bool = True,
     ) -> dict:
         """
         Run semantic retrieval and expand related files from the import graph around top hits.
@@ -1288,11 +1289,13 @@ class QuickContext:
             related_file_limit=max(0, related_file_limit - len(semantic_neighbors)),
         )
 
-        related = self._related_files_for_results(
-            results=anchors,
-            related_seed_files=related_seed_files,
-            related_file_limit=max(0, related_file_limit - len(semantic_neighbors) - len(tooling_neighbors)),
-        )
+        related = []
+        if include_graph_related:
+            related = self._related_files_for_results(
+                results=anchors,
+                related_seed_files=related_seed_files,
+                related_file_limit=max(0, related_file_limit - len(semantic_neighbors) - len(tooling_neighbors)),
+            )
         related_callers = self._related_callers_for_results(results)
 
         return {
@@ -1334,6 +1337,7 @@ class QuickContext:
                 rerank=rerank,
                 related_seed_files=related_seed_files,
                 related_file_limit=related_file_limit,
+                include_graph_related=self._should_use_graph_related_for_query(query),
             )
             bundle["mode"] = "bundle"
             return bundle
@@ -1702,6 +1706,26 @@ class QuickContext:
         if keywords.intersection({"copy", "copied", "shadow", "reindex"}) and keywords.intersection({"collection", "index", "indexed", "points"}):
             return True
         return bool(keywords.intersection(flow_terms)) and len(keywords.intersection(architecture_terms)) >= 2
+
+    def _should_use_graph_related_for_query(self, query: str) -> bool:
+        """
+        Detect when graph expansion is likely to add value beyond semantic neighbors.
+        """
+        keywords = set(extract_keywords(query, max_keywords=20))
+        graph_terms = {
+            "imports",
+            "importers",
+            "dependencies",
+            "dependency",
+            "callers",
+            "caller",
+            "graph",
+            "neighbor",
+            "neighbors",
+            "cross",
+            "cross_file",
+        }
+        return bool(keywords.intersection(graph_terms))
 
     def _related_callers_for_results(self, results: list) -> list[dict]:
         """

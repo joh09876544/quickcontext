@@ -1087,6 +1087,22 @@ class RegressionTests(unittest.TestCase):
         finally:
             qc.close()
 
+    def test_should_use_graph_related_for_dependency_queries(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            self.assertTrue(qc._should_use_graph_related_for_query("Which files import this module and what dependencies does it have?"))
+            self.assertFalse(qc._should_use_graph_related_for_query("How are file path prefixes generated during indexing and then used during retrieval filtering?"))
+        finally:
+            qc.close()
+
     def test_semantic_search_auto_routes_between_search_and_bundle(self) -> None:
         qc = QuickContext(
             EngineConfig(
@@ -1116,6 +1132,44 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(simple["results"], ["plain"])
         self.assertEqual(broad["mode"], "bundle")
         self.assertEqual(broad["results"], ["bundle"])
+
+    def test_semantic_search_bundle_can_skip_graph_related_expansion(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            results = [
+                SearchResult(0.9, "engine/src/qdrant_search.py", "RestQdrantSearchClient", "class", 1, 1, "", ""),
+                SearchResult(0.8, "scripts/search_phase_benchmark.py", "main", "function", 1, 1, "", ""),
+                SearchResult(0.7, "scripts/retrieval_benchmark.py", "main", "function", 1, 1, "", ""),
+            ]
+            with mock.patch.object(qc, "semantic_search", return_value=results), mock.patch.object(
+                qc,
+                "import_graph",
+                side_effect=AssertionError("graph expansion should be skipped"),
+            ), mock.patch.object(
+                qc,
+                "find_importers",
+                side_effect=AssertionError("graph expansion should be skipped"),
+            ):
+                payload = qc.semantic_search_bundle(
+                    "How does the Qdrant phase benchmark separate client-side latency from Qdrant server time?",
+                    project_name="quickcontext",
+                    limit=2,
+                    related_file_limit=2,
+                    include_graph_related=False,
+                )
+        finally:
+            qc.close()
+
+        self.assertEqual(len(payload["related_files"]), 1)
+        self.assertIn(payload["related_files"][0]["file_path"], {"scripts/search_phase_benchmark.py", "scripts/retrieval_benchmark.py"})
 
     def test_search_hydrates_final_results_after_lightweight_query(self) -> None:
         payload = {
