@@ -169,6 +169,18 @@ pub fn symbol_lookup(
         }
     }
 
+    if !query_tokens.is_empty() {
+        for (symbol_id, score) in &mut score_by_symbol_id {
+            if let Some(symbol) = project_index.symbols.get(*symbol_id) {
+                let exact_name_match = symbol.name_lower == query.to_ascii_lowercase();
+                let symbol_tokens = tokenize(&symbol.name);
+                let coverage = symbol_query_coverage(&query_tokens, &symbol_tokens, exact_name_match);
+                *score *= symbol_lookup_coverage_multiplier(query_tokens.len(), coverage, exact_name_match);
+                *score *= symbol_lookup_kind_multiplier(&symbol.kind, query_tokens.len(), coverage, exact_name_match);
+            }
+        }
+    }
+
     let mut ranked: Vec<(usize, f64)> = score_by_symbol_id.into_iter().collect();
     ranked.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
@@ -1020,6 +1032,85 @@ fn compute_intent_symbol_score(
     exact_boost * expanded_boost * coverage_boost * penalty
 }
 
+fn symbol_query_coverage(
+    query_tokens: &[String],
+    symbol_tokens: &[String],
+    exact_name_match: bool,
+) -> f64 {
+    if exact_name_match || query_tokens.is_empty() {
+        return 1.0;
+    }
+
+    let query_terms: HashSet<&str> = query_tokens.iter().map(String::as_str).collect();
+    if query_terms.is_empty() {
+        return 1.0;
+    }
+
+    let symbol_terms: HashSet<&str> = symbol_tokens.iter().map(String::as_str).collect();
+    let matched = query_terms
+        .iter()
+        .filter(|term| symbol_terms.contains(**term))
+        .count();
+
+    matched as f64 / query_terms.len() as f64
+}
+
+fn symbol_lookup_coverage_multiplier(
+    query_token_count: usize,
+    coverage: f64,
+    exact_name_match: bool,
+) -> f64 {
+    if exact_name_match || query_token_count <= 1 {
+        return 1.0;
+    }
+
+    if coverage >= 0.999 {
+        1.16
+    } else if coverage >= 0.66 {
+        1.0
+    } else {
+        0.58
+    }
+}
+
+fn symbol_lookup_kind_multiplier(
+    kind: &str,
+    query_token_count: usize,
+    coverage: f64,
+    exact_name_match: bool,
+) -> f64 {
+    match kind.to_ascii_lowercase().as_str() {
+        "class" | "struct" | "enum" | "interface" | "trait" | "module" => {
+            if exact_name_match {
+                1.22
+            } else if query_token_count > 1 && coverage >= 0.999 {
+                1.14
+            } else {
+                1.06
+            }
+        }
+        "function" | "method" | "constructor" | "type_alias" => {
+            if exact_name_match {
+                1.16
+            } else if query_token_count > 1 && coverage >= 0.999 {
+                1.08
+            } else {
+                1.03
+            }
+        }
+        "import" | "variable" | "property" | "constant" | "data_key" | "decorator" => {
+            if exact_name_match {
+                0.98
+            } else if query_token_count > 1 && coverage < 0.999 {
+                0.54
+            } else {
+                0.86
+            }
+        }
+        _ => 1.0,
+    }
+}
+
 fn persistence_path(root: &Path) -> Result<PathBuf, String> {
     let dir = root.join(".quickcontext");
     fs::create_dir_all(&dir).map_err(|e| format!("failed to create index dir: {e}"))?;
@@ -1155,5 +1246,37 @@ mod tests {
         let high_coverage_score = compute_intent_symbol_score(&high_coverage_tokens, &exact_term_set, &expanded_term_set, 2);
 
         assert!(high_coverage_score > partial_score);
+    }
+
+    #[test]
+    fn test_symbol_query_coverage_penalizes_partial_multi_token_matches() {
+        let query_tokens = vec!["collection".to_string(), "manager".to_string()];
+        let exact_tokens = vec!["collection".to_string(), "manager".to_string()];
+        let partial_tokens = vec!["collection".to_string()];
+
+        let exact_coverage = symbol_query_coverage(&query_tokens, &exact_tokens, false);
+        let partial_coverage = symbol_query_coverage(&query_tokens, &partial_tokens, false);
+
+        assert!(exact_coverage > partial_coverage);
+        assert_eq!(partial_coverage, 0.5);
+    }
+
+    #[test]
+    fn test_symbol_lookup_kind_multiplier_prefers_definitions_over_partial_noise() {
+        let definition_score = symbol_lookup_coverage_multiplier(2, 1.0, true)
+            * symbol_lookup_kind_multiplier("class", 2, 1.0, true);
+        let import_score = symbol_lookup_coverage_multiplier(2, 0.5, false)
+            * symbol_lookup_kind_multiplier("import", 2, 0.5, false);
+        let variable_score = symbol_lookup_coverage_multiplier(2, 0.5, false)
+            * symbol_lookup_kind_multiplier("variable", 2, 0.5, false);
+
+        assert!(definition_score > import_score);
+        assert!(definition_score > variable_score);
+    }
+
+    #[test]
+    fn test_symbol_lookup_coverage_multiplier_is_neutral_for_single_token_queries() {
+        let multiplier = symbol_lookup_coverage_multiplier(1, 0.5, false);
+        assert_eq!(multiplier, 1.0);
     }
 }

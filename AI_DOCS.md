@@ -11,6 +11,15 @@ The repository currently focuses on:
 
 The project is still in progress. There is room to improve architecture, speed, ranking quality, and developer experience. MCP support is planned but not yet part of the tracked repo.
 
+## Product Direction
+
+- The primary product target is a long-lived Rust service plus a Python SDK wrapper.
+- Rust should keep handling parsing, symbol and text search, graph operations, and other hot paths where performance matters.
+- Python should keep handling embeddings, Qdrant orchestration, higher-level retrieval logic, and the SDK surface used by other tools.
+- The Python CLI is mainly a development and validation surface. It is useful, but it is not the main product target.
+- MCP is intentionally a later thin layer over the SDK. It is low priority until speed and retrieval quality are strong.
+- When evaluating performance work, prioritize persistent service and SDK workflows over one-shot CLI startup optics.
+
 ## Architecture
 
 - `service/`: Rust binary and IPC server
@@ -18,9 +27,10 @@ The project is still in progress. There is room to improve architecture, speed, 
 
 Flow:
 
-1. Python talks to Rust through local IPC
-2. Rust handles parser and search-heavy operations
-3. Python handles indexing, embeddings, Qdrant collections, and higher-level workflows
+1. Keep the Rust service process running.
+2. Python talks to Rust through local IPC.
+3. Rust handles parser, search, and other heavy operations.
+4. Python handles indexing, embeddings, Qdrant collections, retrieval composition, and SDK ergonomics.
 
 ## IPC Transport
 
@@ -95,7 +105,7 @@ Run the service:
 - Windows: `./service/target/release/quickcontext-service.exe serve`
 - Linux: `./service/target/release/quickcontext-service serve`
 
-Common engine flow:
+Common SDK and engine flow:
 
 - `python -m engine status`
 - `python -m engine init`
@@ -103,6 +113,8 @@ Common engine flow:
 - `python -m engine search "<query>" [--project <name>]`
 - `python -m engine refresh <files...>`
 - `python -m engine watch <dir>`
+
+Use the CLI to validate and benchmark the same underlying service and SDK behavior. Do not treat CLI startup as the main product surface.
 
 ## Validation And Benchmarking
 
@@ -118,6 +130,7 @@ Benchmarking guidance:
 
 - Prefer direct before/after timings for any speed-related change.
 - Use the Rust release binary for service-only timings.
+- Benchmark live SDK calls against a running Rust service, not only one-shot CLI invocations.
 - Use bounded targets for end-to-end indexing when the active config uses remote embeddings.
 - Keep local benchmark notes in `BENCHMARK_LOCAL.md`. That file is intentionally gitignored.
 
@@ -152,7 +165,7 @@ Useful areas for contributors:
 ## Notes For AI Agents
 
 - Read the code before proposing structural changes.
-- Treat `engine/` and `service/` as the core product surface.
+- Treat the persistent Rust service plus Python SDK as the core product surface.
 - When touching indexing or search, check dimension compatibility and collection behavior.
 - When touching IPC, keep Windows and Linux behavior aligned at the protocol level.
 - When touching docs, keep them plain, direct, and easy to navigate.
