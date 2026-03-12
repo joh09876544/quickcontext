@@ -734,6 +734,7 @@ class CodeSearcher:
             final_score += self._filecache_bonus(file_path_value, symbol_name_value, ranking_keywords)
             final_score += self._role_bonus(point.payload.get("role"), ranking_keywords)
             final_score *= self._subsystem_conflict_penalty(file_path_value, ranking_keywords)
+            final_score *= self._ranking_subsystem_penalty(file_path_value, ranking_keywords)
             final_score *= self._ranking_helper_penalty(symbol_name_value, ranking_keywords)
             final_score *= self._startup_import_symbol_penalty(symbol_kind_value, ranking_keywords)
             final_score *= self._constructor_penalty(symbol_name_value, ranking_keywords)
@@ -1005,6 +1006,7 @@ class CodeSearcher:
             final_score += self._filecache_bonus(file_path_value, symbol_name_value, ranking_keywords)
             final_score += self._role_bonus(point.payload.get("role"), ranking_keywords)
             final_score *= self._subsystem_conflict_penalty(file_path_value, ranking_keywords)
+            final_score *= self._ranking_subsystem_penalty(file_path_value, ranking_keywords)
             final_score *= self._ranking_helper_penalty(symbol_name_value, ranking_keywords)
             final_score *= self._startup_import_symbol_penalty(symbol_kind_value, ranking_keywords)
             final_score *= self._constructor_penalty(symbol_name_value, ranking_keywords)
@@ -1690,6 +1692,26 @@ class CodeSearcher:
         if keyword_set.intersection({"rank", "ranking", "score", "scoring", "rerank", "boost", "bonus", "penalty", "relevance"}):
             return 1.0
         return 0.25
+
+    def _ranking_subsystem_penalty(self, file_path: str, ranking_keywords: list[str]) -> float:
+        """
+        Down-rank ranking/search-tuning modules for non-ranking architecture questions.
+        """
+        if not ranking_keywords:
+            return 1.0
+
+        keyword_set = set(ranking_keywords)
+        if keyword_set.intersection({"rank", "ranking", "score", "scoring", "rerank", "boost", "bonus", "penalty", "relevance", "search"}):
+            return 1.0
+
+        normalized = file_path.replace("\\", "/").lower()
+        if (
+            normalized.endswith("/engine/src/searcher.py")
+            or normalized.endswith("/service/src/structural_boost.rs")
+            or normalized.endswith("/service/src/ranking.rs")
+        ):
+            return 0.62
+        return 1.0
 
     def _filecache_bonus(self, file_path: str, symbol_name: str, ranking_keywords: list[str]) -> float:
         """

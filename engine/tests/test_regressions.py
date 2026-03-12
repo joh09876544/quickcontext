@@ -616,6 +616,24 @@ class RegressionTests(unittest.TestCase):
         self.assertLess(penalty, 1.0)
         self.assertEqual(neutral, 1.0)
 
+    def test_ranking_subsystem_penalty_downranks_search_modules_for_non_search_queries(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        penalty = searcher._ranking_subsystem_penalty(
+            str(Path("service/src/structural_boost.rs").resolve()),
+            ["role", "metadata", "rust", "indexed", "vector", "payloads"],
+        )
+        neutral = searcher._ranking_subsystem_penalty(
+            str(Path("engine/src/searcher.py").resolve()),
+            ["search", "path", "filters"],
+        )
+        self.assertLess(penalty, 1.0)
+        self.assertEqual(neutral, 1.0)
+
     def test_filecache_bonus_prefers_cache_module_for_unchanged_detection(self) -> None:
         searcher = CodeSearcher(
             client=None,
