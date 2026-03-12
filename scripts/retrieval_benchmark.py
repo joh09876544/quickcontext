@@ -29,6 +29,7 @@ class EvalResult:
     latency_ms: float
     hit_rank: int | None
     top_paths: tuple[str, ...]
+    top3_coverage: float
 
 
 DEFAULT_CASES = (
@@ -135,6 +136,18 @@ def _match_rank(paths: list[str], expected_paths: tuple[str, ...]) -> int | None
     return None
 
 
+def _top_path_coverage(paths: list[str], expected_paths: tuple[str, ...], limit: int = 3) -> float:
+    if not expected_paths:
+        return 0.0
+
+    normalized_expected = tuple(fragment.lower() for fragment in expected_paths)
+    matched = 0
+    for fragment in normalized_expected:
+        if any(fragment in _normalize_path(path) for path in paths[:limit]):
+            matched += 1
+    return matched / len(normalized_expected)
+
+
 def _evaluate_case(
     qc: QuickContext,
     case: EvalCase,
@@ -161,6 +174,7 @@ def _evaluate_case(
         latency_ms=latency_ms,
         hit_rank=_match_rank(list(top_paths), case.expected_paths),
         top_paths=top_paths,
+        top3_coverage=_top_path_coverage(list(top_paths), case.expected_paths, limit=3),
     )
 
 
@@ -169,12 +183,14 @@ def _print_results(results: list[EvalResult], show_top: int) -> None:
     hit3 = sum(1 for result in results if result.hit_rank is not None and result.hit_rank <= 3)
     mrr = sum(0.0 if result.hit_rank is None else 1.0 / result.hit_rank for result in results) / len(results)
     latencies = [result.latency_ms for result in results]
+    mean_coverage = sum(result.top3_coverage for result in results) / len(results)
 
     print("Summary")
     print(f"  Cases: {len(results)}")
     print(f"  Hit@1: {hit1}/{len(results)}")
     print(f"  Hit@3: {hit3}/{len(results)}")
     print(f"  MRR: {mrr:.4f}")
+    print(f"  Mean top-3 expected-path coverage: {mean_coverage:.4f}")
     print(f"  Mean latency: {mean(latencies):.2f} ms")
     print(f"  Median latency: {median(latencies):.2f} ms")
     print()
@@ -183,6 +199,7 @@ def _print_results(results: list[EvalResult], show_top: int) -> None:
         rank_text = str(result.hit_rank) if result.hit_rank is not None else "miss"
         print(result.case.query)
         print(f"  hit_rank: {rank_text}")
+        print(f"  top3_coverage: {result.top3_coverage:.2f}")
         print(f"  latency_ms: {result.latency_ms:.2f}")
         for idx, path in enumerate(result.top_paths[: max(1, show_top)], 1):
             print(f"  {idx}. {path}")
