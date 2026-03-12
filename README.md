@@ -14,6 +14,8 @@ The SDK now also includes a graph-aware context helper:
 - `QuickContext.semantic_search_bundle(...)`
   Returns semantic anchors plus distinct semantic neighbor files, related import-graph files, and caller context for deeper codebase exploration.
 
+Use `semantic_search(...)` for fast direct retrieval and `semantic_search_bundle(...)` when the question is broad or likely to require cross-file follow-up context.
+
 ## Status
 
 This repository is still a work in progress.
