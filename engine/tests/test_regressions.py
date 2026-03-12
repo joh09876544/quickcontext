@@ -1029,13 +1029,12 @@ class RegressionTests(unittest.TestCase):
                 SearchResult(0.8, "scripts/search_phase_benchmark.py", "main", "function", 1, 1, "", ""),
                 SearchResult(0.7, "scripts/retrieval_benchmark.py", "main", "function", 1, 1, "", ""),
             ]
-            with mock.patch.object(qc, "semantic_search", return_value=results):
-                related = qc._tooling_related_semantic_neighbors(
-                    query="How does the Qdrant phase benchmark separate client-side latency from Qdrant server time?",
-                    project_name="quickcontext",
-                    excluded_paths={"engine/src/qdrant_search.py"},
-                    related_file_limit=2,
-                )
+            related = qc._tooling_related_semantic_neighbors(
+                results=results,
+                tooling_query=True,
+                excluded_paths={"engine/src/qdrant_search.py"},
+                related_file_limit=2,
+            )
         finally:
             qc.close()
 

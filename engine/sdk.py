@@ -1261,10 +1261,14 @@ class QuickContext:
         and a small set of adjacent files to inspect next.
         """
         project = project_name if project_name else detect_project_name(Path.cwd(), manual_override=None)
+        tooling_query = self._looks_like_tooling_query(query)
+        semantic_limit = max(limit, 1) * 4
+        if tooling_query:
+            semantic_limit = max(semantic_limit, 24)
         results = self.semantic_search(
             query=query,
             mode=mode,
-            limit=max(limit, 1) * 4,
+            limit=semantic_limit,
             language=language,
             path_prefix=path_prefix,
             project_name=project,
@@ -1278,8 +1282,8 @@ class QuickContext:
             related_file_limit=related_file_limit,
         )
         tooling_neighbors = self._tooling_related_semantic_neighbors(
-            query=query,
-            project_name=project,
+            results=results,
+            tooling_query=tooling_query,
             excluded_paths={item.file_path for item in anchors} | {item["file_path"] for item in semantic_neighbors},
             related_file_limit=max(0, related_file_limit - len(semantic_neighbors)),
         )
@@ -1577,24 +1581,19 @@ class QuickContext:
 
     def _tooling_related_semantic_neighbors(
         self,
-        query: str,
-        project_name: str,
+        results: list,
+        tooling_query: bool,
         excluded_paths: set[str],
         related_file_limit: int,
     ) -> list[dict]:
         """
         Add script-centric semantic neighbors for benchmark and tooling questions.
         """
-        if related_file_limit <= 0 or not self._looks_like_tooling_query(query):
+        if related_file_limit <= 0 or not tooling_query:
             return []
 
-        tooling_results = self.semantic_search(
-            query=query,
-            project_name=project_name,
-            limit=24,
-        )
         related: list[dict] = []
-        for item in tooling_results:
+        for item in results:
             file_path = str(item.file_path)
             normalized = file_path.replace("\\", "/").lower()
             if "/scripts/" not in normalized and not normalized.startswith("scripts/"):
