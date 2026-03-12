@@ -727,6 +727,13 @@ class CodeSearcher:
             final_score *= self._path_signal_multiplier(file_path_value, ranking_keywords)
             final_score += self._basename_hit_bonus(file_path_value, ranking_keywords)
             final_score += self._provider_path_bonus(file_path_value, ranking_keywords)
+            final_score += self._startup_boundary_bonus(file_path_value, ranking_keywords)
+            final_score += self._startup_symbol_bonus(file_path_value, symbol_name_value, ranking_keywords)
+            final_score += self._implementation_path_bonus(file_path_value, ranking_keywords)
+            final_score += self._filecache_bonus(file_path_value, symbol_name_value, ranking_keywords)
+            final_score *= self._subsystem_conflict_penalty(file_path_value, ranking_keywords)
+            final_score *= self._constructor_penalty(symbol_name_value, ranking_keywords)
+            final_score *= self._wrapper_symbol_penalty(file_path_value, symbol_name_value, ranking_keywords)
             final_score *= self._container_symbol_penalty(symbol_name_value, symbol_kind_value, ranking_keywords)
             if ranking_keywords:
                 symbol_tokens = self._symbol_tokens(
@@ -988,6 +995,13 @@ class CodeSearcher:
             final_score *= self._path_signal_multiplier(file_path_value, ranking_keywords)
             final_score += self._basename_hit_bonus(file_path_value, ranking_keywords)
             final_score += self._provider_path_bonus(file_path_value, ranking_keywords)
+            final_score += self._startup_boundary_bonus(file_path_value, ranking_keywords)
+            final_score += self._startup_symbol_bonus(file_path_value, symbol_name_value, ranking_keywords)
+            final_score += self._implementation_path_bonus(file_path_value, ranking_keywords)
+            final_score += self._filecache_bonus(file_path_value, symbol_name_value, ranking_keywords)
+            final_score *= self._subsystem_conflict_penalty(file_path_value, ranking_keywords)
+            final_score *= self._constructor_penalty(symbol_name_value, ranking_keywords)
+            final_score *= self._wrapper_symbol_penalty(file_path_value, symbol_name_value, ranking_keywords)
             final_score *= self._container_symbol_penalty(symbol_name_value, symbol_kind_value, ranking_keywords)
             if ranking_keywords:
                 symbol_tokens = self._symbol_tokens(
@@ -1331,7 +1345,16 @@ class CodeSearcher:
                 or normalized.startswith("tests/")
             )
         ):
-            return 0.78
+            return 0.3
+
+        if (
+            not query_terms.intersection({"script", "scripts", "benchmark", "benchmarks", "harness"})
+            and (
+                "/scripts/" in normalized
+                or normalized.startswith("scripts/")
+            )
+        ):
+            return 0.68
 
         low_signal_suffixes = (
             ".yml",
@@ -1513,6 +1536,169 @@ class CodeSearcher:
         if normalized.endswith("/factory.py"):
             bonus += 0.03
         return bonus
+
+    def _startup_boundary_bonus(self, file_path: str, ranking_keywords: list[str]) -> float:
+        """
+        Prefer startup-boundary files for parser-only import and startup questions.
+        """
+        if not ranking_keywords:
+            return 0.0
+
+        keyword_set = set(ranking_keywords)
+        if "parser" not in keyword_set:
+            return 0.0
+        if not keyword_set.intersection({"startup", "import", "imports", "qdrant"}):
+            return 0.0
+
+        normalized = file_path.replace("\\", "/").lower()
+        if normalized.endswith("/engine/__init__.py"):
+            return 0.22
+        if normalized.endswith("/engine/src/parsing.py"):
+            return 0.20
+        if normalized.endswith("/engine/src/pipe.py"):
+            return 0.08
+        return 0.0
+
+    def _implementation_path_bonus(self, file_path: str, ranking_keywords: list[str]) -> float:
+        """
+        Prefer lower-level implementation files over wrappers for internal architecture questions.
+        """
+        if not ranking_keywords:
+            return 0.0
+
+        keyword_set = set(ranking_keywords)
+        if not keyword_set.intersection({"path", "prefix", "scope", "scoped", "filter", "filters", "payload", "payloads"}):
+            return 0.0
+        if not keyword_set.intersection({"semantic", "search", "retrieval", "index", "indexing"}):
+            return 0.0
+
+        normalized = file_path.replace("\\", "/").lower()
+        if normalized.endswith("/engine/src/searcher.py"):
+            return 0.08
+        if normalized.endswith("/engine/src/indexer.py"):
+            return 0.07
+        return 0.0
+
+    def _startup_symbol_bonus(self, file_path: str, symbol_name: str, ranking_keywords: list[str]) -> float:
+        """
+        Prefer startup-boundary symbols that actually explain the parser-side import path.
+        """
+        if not ranking_keywords:
+            return 0.0
+
+        keyword_set = set(ranking_keywords)
+        if "parser" not in keyword_set:
+            return 0.0
+        if not keyword_set.intersection({"startup", "import", "imports", "qdrant"}):
+            return 0.0
+
+        normalized = file_path.replace("\\", "/").lower()
+        if normalized.endswith("/engine/src/parsing.py") and symbol_name == "RustParserService":
+            return 0.03
+        if normalized.endswith("/engine/__init__.py") and symbol_name in {"__getattr__", "QuickContext"}:
+            return 0.03
+        return 0.0
+
+    def _wrapper_symbol_penalty(self, file_path: str, symbol_name: str, ranking_keywords: list[str]) -> float:
+        """
+        Down-rank generic wrapper entrypoints when the query is clearly asking for lower-level implementation details.
+        """
+        if not ranking_keywords:
+            return 1.0
+
+        normalized = file_path.replace("\\", "/").lower()
+        keyword_set = set(ranking_keywords)
+        symbol = symbol_name.lower()
+
+        if normalized.endswith("/engine/sdk.py"):
+            if (
+                symbol in {"semantic_search", "structured_search"}
+                and keyword_set.intersection({"path", "prefix", "scope", "scoped", "filter", "filters", "payload", "payloads"})
+            ):
+                return 0.48
+            if (
+                symbol in {"refresh_files", "watch", "index_directory"}
+                and keyword_set.intersection({"detect", "unchanged", "file", "files"})
+                and keyword_set.intersection({"index", "indexing"})
+            ):
+                return 0.52
+            if (
+                symbol in {"parser_service", "quickcontext", "connection", "code_provider", "desc_provider", "_get_searcher"}
+                and "parser" in keyword_set
+                and keyword_set.intersection({"startup", "import", "imports", "qdrant"})
+            ):
+                return 0.35
+
+        if normalized.endswith("/engine/src/cli.py"):
+            if (
+                symbol in {"search", "cli", "mcp_hints", "init"}
+                and keyword_set.intersection({"provider", "providers", "dependency", "dependencies", "path", "prefix", "filter", "filters", "payload", "payloads"})
+            ):
+                return 0.52
+            if (
+                symbol in {"init", "_optimize_search_config"}
+                and "parser" in keyword_set
+                and keyword_set.intersection({"startup", "import", "imports", "qdrant"})
+            ):
+                return 0.42
+
+        return 1.0
+
+    def _constructor_penalty(self, symbol_name: str, ranking_keywords: list[str]) -> float:
+        """
+        Avoid ranking constructors highly for non-constructor architecture questions.
+        """
+        if symbol_name != "__init__":
+            return 1.0
+        if len(ranking_keywords) < 2:
+            return 1.0
+        if set(ranking_keywords).intersection({"init", "initialize", "initialization", "constructor"}):
+            return 1.0
+        return 0.55
+
+    def _filecache_bonus(self, file_path: str, symbol_name: str, ranking_keywords: list[str]) -> float:
+        """
+        Prefer file-signature cache code for unchanged-file detection questions.
+        """
+        if not ranking_keywords:
+            return 0.0
+
+        keyword_set = set(ranking_keywords)
+        if not keyword_set.intersection({"detect", "unchanged", "file", "files"}):
+            return 0.0
+        if not keyword_set.intersection({"index", "indexing"}):
+            return 0.0
+
+        normalized = file_path.replace("\\", "/").lower()
+        if not normalized.endswith("/engine/src/filecache.py"):
+            return 0.0
+
+        bonus = 0.06
+        if symbol_name in {"is_unchanged_from_metadata", "is_unchanged"}:
+            bonus += 0.04
+        return bonus
+
+    def _subsystem_conflict_penalty(self, file_path: str, ranking_keywords: list[str]) -> float:
+        """
+        Down-rank clearly unrelated subsystems for targeted architecture questions.
+        """
+        if not ranking_keywords:
+            return 1.0
+
+        keyword_set = set(ranking_keywords)
+        normalized = file_path.replace("\\", "/").lower()
+
+        if "parser" in keyword_set and keyword_set.intersection({"startup", "import", "imports", "qdrant"}):
+            if (
+                "/providers/" in normalized
+                or normalized.endswith("/engine/src/embedder.py")
+                or normalized.endswith("/engine/src/describer.py")
+            ):
+                return 0.48
+            if normalized.endswith("/engine/src/qdrant.py"):
+                return 0.58
+
+        return 1.0
 
     def _container_symbol_penalty(
         self,

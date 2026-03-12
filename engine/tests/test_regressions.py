@@ -417,6 +417,191 @@ class RegressionTests(unittest.TestCase):
         self.assertGreater(bonus, 0.0)
         self.assertEqual(neutral, 0.0)
 
+    def test_startup_boundary_bonus_prefers_parser_startup_files(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        bonus = searcher._startup_boundary_bonus(
+            str(Path("engine/src/parsing.py").resolve()),
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        neutral = searcher._startup_boundary_bonus(
+            str(Path("engine/src/searcher.py").resolve()),
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        self.assertGreater(bonus, 0.0)
+        self.assertEqual(neutral, 0.0)
+
+    def test_implementation_path_bonus_prefers_searcher_and_indexer(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        searcher_bonus = searcher._implementation_path_bonus(
+            str(Path("engine/src/searcher.py").resolve()),
+            ["path", "scoped", "semantic", "search", "payloads", "filters"],
+        )
+        indexer_bonus = searcher._implementation_path_bonus(
+            str(Path("engine/src/indexer.py").resolve()),
+            ["path", "scoped", "semantic", "search", "payloads", "filters"],
+        )
+        neutral = searcher._implementation_path_bonus(
+            str(Path("engine/sdk.py").resolve()),
+            ["path", "scoped", "semantic", "search", "payloads", "filters"],
+        )
+        self.assertGreater(searcher_bonus, 0.0)
+        self.assertGreater(indexer_bonus, 0.0)
+        self.assertEqual(neutral, 0.0)
+
+    def test_startup_symbol_bonus_prefers_rust_parser_service_for_startup_query(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        bonus = searcher._startup_symbol_bonus(
+            str(Path("engine/src/parsing.py").resolve()),
+            "RustParserService",
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        neutral = searcher._startup_symbol_bonus(
+            str(Path("engine/src/collection.py").resolve()),
+            "CollectionManager",
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        self.assertGreater(bonus, 0.0)
+        self.assertEqual(neutral, 0.0)
+
+    def test_wrapper_symbol_penalty_downranks_sdk_wrappers_for_internal_queries(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        penalty = searcher._wrapper_symbol_penalty(
+            str(Path("engine/sdk.py").resolve()),
+            "semantic_search",
+            ["path", "scoped", "semantic", "search", "payloads", "filters"],
+        )
+        neutral = searcher._wrapper_symbol_penalty(
+            str(Path("engine/src/searcher.py").resolve()),
+            "search_hybrid",
+            ["path", "scoped", "semantic", "search", "payloads", "filters"],
+        )
+        self.assertLess(penalty, 1.0)
+        self.assertEqual(neutral, 1.0)
+
+    def test_wrapper_symbol_penalty_downranks_cli_init_for_parser_startup_query(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        penalty = searcher._wrapper_symbol_penalty(
+            str(Path("engine/src/cli.py").resolve()),
+            "init",
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        self.assertLess(penalty, 1.0)
+
+        optimize_penalty = searcher._wrapper_symbol_penalty(
+            str(Path("engine/src/cli.py").resolve()),
+            "_optimize_search_config",
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        self.assertLess(optimize_penalty, 1.0)
+
+    def test_wrapper_symbol_penalty_downranks_sdk_provider_property_for_parser_startup_query(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        penalty = searcher._wrapper_symbol_penalty(
+            str(Path("engine/sdk.py").resolve()),
+            "code_provider",
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        self.assertLess(penalty, 1.0)
+
+        get_searcher_penalty = searcher._wrapper_symbol_penalty(
+            str(Path("engine/sdk.py").resolve()),
+            "_get_searcher",
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        self.assertLess(get_searcher_penalty, 1.0)
+
+    def test_constructor_penalty_downranks_init_for_non_constructor_queries(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        penalty = searcher._constructor_penalty(
+            "__init__",
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        neutral = searcher._constructor_penalty(
+            "__init__",
+            ["constructor", "qdrant", "client"],
+        )
+        self.assertLess(penalty, 1.0)
+        self.assertEqual(neutral, 1.0)
+
+    def test_filecache_bonus_prefers_cache_module_for_unchanged_detection(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        bonus = searcher._filecache_bonus(
+            str(Path("engine/src/filecache.py").resolve()),
+            "is_unchanged_from_metadata",
+            ["detect", "unchanged", "files", "before", "indexing"],
+        )
+        neutral = searcher._filecache_bonus(
+            str(Path("engine/sdk.py").resolve()),
+            "refresh_files",
+            ["detect", "unchanged", "files", "before", "indexing"],
+        )
+        self.assertGreater(bonus, 0.0)
+        self.assertEqual(neutral, 0.0)
+
+    def test_subsystem_conflict_penalty_downranks_provider_modules_for_parser_startup_query(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        penalty = searcher._subsystem_conflict_penalty(
+            str(Path("engine/src/providers/litellm_provider.py").resolve()),
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        neutral = searcher._subsystem_conflict_penalty(
+            str(Path("engine/src/parsing.py").resolve()),
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        self.assertLess(penalty, 1.0)
+        self.assertEqual(neutral, 1.0)
+
+        qdrant_penalty = searcher._subsystem_conflict_penalty(
+            str(Path("engine/src/qdrant.py").resolve()),
+            ["parser", "commands", "qdrant", "imports", "startup"],
+        )
+        self.assertLess(qdrant_penalty, 1.0)
+
     def test_action_query_boosts_matching_symbol_action(self) -> None:
         searcher = CodeSearcher(
             client=None,
@@ -449,6 +634,24 @@ class RegressionTests(unittest.TestCase):
         no_penalty = searcher._path_signal_multiplier(
             str(Path("engine/tests/test_regressions.py").resolve()),
             ["test", "regression", "imports"],
+        )
+        self.assertLess(penalty, 1.0)
+        self.assertEqual(no_penalty, 1.0)
+
+    def test_non_benchmark_query_penalizes_scripts_paths(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        penalty = searcher._path_signal_multiplier(
+            str(Path("scripts/retrieval_benchmark.py").resolve()),
+            ["parser", "python", "commands"],
+        )
+        no_penalty = searcher._path_signal_multiplier(
+            str(Path("scripts/retrieval_benchmark.py").resolve()),
+            ["benchmark", "retrieval", "cases"],
         )
         self.assertLess(penalty, 1.0)
         self.assertEqual(no_penalty, 1.0)
