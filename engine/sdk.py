@@ -1265,7 +1265,7 @@ class QuickContext:
         tooling_query = self._looks_like_tooling_query(query)
         semantic_limit = max(limit, 1) * 4
         if tooling_query:
-            semantic_limit = max(semantic_limit, 24)
+            semantic_limit = max(semantic_limit, 20)
         results = self.semantic_search(
             query=query,
             mode=mode,
