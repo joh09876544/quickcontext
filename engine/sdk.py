@@ -1285,16 +1285,22 @@ class QuickContext:
         tooling_neighbors = self._tooling_related_semantic_neighbors(
             results=results,
             tooling_query=tooling_query,
-            excluded_paths={item.file_path for item in anchors} | {item["file_path"] for item in semantic_neighbors},
-            related_file_limit=max(0, related_file_limit - len(semantic_neighbors)),
+            excluded_paths={item.file_path for item in anchors},
+            related_file_limit=related_file_limit,
         )
+        tooling_paths = {item["file_path"] for item in tooling_neighbors}
+        prioritized_related = tooling_neighbors + [
+            item
+            for item in semantic_neighbors
+            if item["file_path"] not in tooling_paths
+        ]
 
         related = []
         if include_graph_related:
             related = self._related_files_for_results(
                 results=anchors,
                 related_seed_files=related_seed_files,
-                related_file_limit=max(0, related_file_limit - len(semantic_neighbors) - len(tooling_neighbors)),
+                related_file_limit=max(0, related_file_limit - len(prioritized_related)),
             )
         related_callers = self._related_callers_for_results(results)
 
@@ -1302,7 +1308,7 @@ class QuickContext:
             "query": query,
             "project_name": project,
             "results": anchors,
-            "related_files": semantic_neighbors + tooling_neighbors + related,
+            "related_files": prioritized_related[:related_file_limit] + related,
             "related_callers": related_callers,
         }
 
