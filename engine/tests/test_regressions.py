@@ -1074,6 +1074,16 @@ class RegressionTests(unittest.TestCase):
                     "How are file path prefixes generated during indexing and then used during retrieval filtering?"
                 )
             )
+            self.assertTrue(
+                qc._should_use_bundle_for_query(
+                    "How does the Qdrant phase benchmark separate client-side latency from Qdrant server time?"
+                )
+            )
+            self.assertTrue(
+                qc._should_use_bundle_for_query(
+                    "How are unchanged points copied into the new shadow collection during a full reindex?"
+                )
+            )
             self.assertFalse(qc._should_use_bundle_for_query("Where are query embeddings cached?"))
         finally:
             qc.close()

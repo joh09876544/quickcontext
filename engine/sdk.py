@@ -1647,6 +1647,9 @@ class QuickContext:
         """
         Detect broad cross-file and pipeline questions that benefit from bundle expansion.
         """
+        if self._looks_like_tooling_query(query):
+            return True
+
         keywords = set(extract_keywords(query, max_keywords=20))
         if len(keywords) < 6:
             return False
@@ -1694,7 +1697,11 @@ class QuickContext:
             "coverage",
             "wrapper",
             "wrappers",
+            "shadow",
+            "reindex",
         }
+        if keywords.intersection({"copy", "copied", "shadow", "reindex"}) and keywords.intersection({"collection", "index", "indexed", "points"}):
+            return True
         return bool(keywords.intersection(flow_terms)) and len(keywords.intersection(architecture_terms)) >= 2
 
     def _related_callers_for_results(self, results: list) -> list[dict]:
