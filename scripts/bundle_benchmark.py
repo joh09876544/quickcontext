@@ -23,7 +23,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--cases-file", required=True, help="JSON file containing benchmark cases.")
     parser.add_argument("--limit", type=int, default=3, help="Semantic result limit.")
     parser.add_argument("--related-seed-files", type=int, default=1, help="Seed files for graph expansion.")
-    parser.add_argument("--related-file-limit", type=int, default=6, help="Related files to return.")
+    parser.add_argument("--related-file-limit", type=int, default=8, help="Related files to return.")
     return parser.parse_args()
 
 

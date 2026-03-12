@@ -1251,7 +1251,7 @@ class QuickContext:
         keyword_weight: float = 0.3,
         rerank: bool = False,
         related_seed_files: int = 1,
-        related_file_limit: int = 6,
+        related_file_limit: int = 8,
     ) -> dict:
         """
         Run semantic retrieval and expand related files from the import graph around top hits.
