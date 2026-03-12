@@ -557,6 +557,11 @@ class LazyImportBoundaryTests(unittest.TestCase):
         module = importlib.import_module(module_name)
         return importlib.reload(module)
 
+    def test_engine_package_import_does_not_require_qdrant_client(self) -> None:
+        with _BlockedImport({"qdrant_client"}):
+            module = self._reload_module("engine")
+            self.assertTrue(hasattr(module, "__getattr__"))
+
     def test_parsing_import_does_not_require_qdrant_client(self) -> None:
         with _BlockedImport({"qdrant_client"}):
             module = self._reload_module("engine.src.parsing")
