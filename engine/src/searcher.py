@@ -303,16 +303,7 @@ class CodeSearcher:
         blend_keywords = ranking_keywords if use_keywords else []
         request_limit = max(limit * 3, 30)
 
-        if self._can_share_query_embedding():
-            shared_vector = self._embed_query_with_provider_cached(query, self._code_provider, cache_key="shared")
-            code_vector = shared_vector
-            desc_vector = shared_vector
-        else:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                code_future = executor.submit(self._embed_query_cached, query, "code")
-                desc_future = executor.submit(self._embed_query_cached, query, "description")
-                code_vector = code_future.result()
-                desc_vector = desc_future.result()
+        code_vector, desc_vector = self._hybrid_query_vectors(query)
 
         code_results, desc_results = self._batch_search(
             requests=[
@@ -1132,6 +1123,39 @@ class CodeSearcher:
             and self._code_provider.model == self._desc_provider.model
             and self._code_provider.dimension == self._desc_provider.dimension
         )
+
+    def _hybrid_query_vectors(self, query: str) -> tuple[list[float], list[float]]:
+        """
+        Resolve code and description query vectors for hybrid search with minimal overhead.
+        """
+        if self._can_share_query_embedding():
+            shared_vector = self._embed_query_with_provider_cached(query, self._code_provider, cache_key="shared")
+            return shared_vector, shared_vector
+
+        code_cached = self._cached_query_vector(("code", query))
+        desc_cached = self._cached_query_vector(("description", query))
+        if code_cached is not None and desc_cached is not None:
+            return code_cached, desc_cached
+        if code_cached is not None:
+            return code_cached, self._embed_query_cached(query, "description")
+        if desc_cached is not None:
+            return self._embed_query_cached(query, "code"), desc_cached
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            code_future = executor.submit(self._embed_query_cached, query, "code")
+            desc_future = executor.submit(self._embed_query_cached, query, "description")
+            return code_future.result(), desc_future.result()
+
+    def _cached_query_vector(self, cache_key: tuple[str, str]) -> Optional[list[float]]:
+        """
+        Return a cached query vector without invoking the embedding provider.
+        """
+        with self._cache_lock:
+            cached = self._query_vector_cache.get(cache_key)
+            if cached is None:
+                return None
+            self._query_vector_cache.move_to_end(cache_key)
+            return cached
 
     def _embed_query_with_provider_cached(
         self,

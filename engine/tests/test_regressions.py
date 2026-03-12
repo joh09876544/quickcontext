@@ -239,6 +239,37 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertTrue(searcher._can_share_query_embedding())
 
+    def test_search_hybrid_uses_cached_vectors_without_thread_pool(self) -> None:
+        payload = {
+            "file_path": str(Path("engine/src/searcher.py").resolve()),
+            "symbol_name": "_embed_query_with_provider_cached",
+            "symbol_kind": "function",
+            "line_start": 1,
+            "line_end": 5,
+            "description": "Cache query embedding vectors.",
+            "keywords": ["query", "embedding", "cache"],
+            "path_context": "engine / src / searcher.py",
+        }
+        client = _FakeClient([_FakePoint(0.8, payload, point_id="point-1")])
+        searcher = CodeSearcher(
+            client=client,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        searcher._query_vector_cache[("code", "query embedding cache")] = [0.1, 0.2]
+        searcher._query_vector_cache[("description", "query embedding cache")] = [0.3, 0.4]
+
+        with mock.patch("engine.src.searcher.ThreadPoolExecutor", side_effect=AssertionError("thread pool should not be created")):
+            results = searcher.search_hybrid(
+                query="query embedding cache",
+                limit=1,
+                use_keywords=False,
+                include_source=False,
+            )
+
+        self.assertEqual(len(results), 1)
+
     def test_path_prefix_filter_builds_server_side_constraint(self) -> None:
         searcher = CodeSearcher(
             client=None,
