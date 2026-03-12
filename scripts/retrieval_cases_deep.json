@@ -1,0 +1,66 @@
+[
+  {
+    "query": "How does the engine avoid hydrating source code on the default search path unless it is actually needed?",
+    "expected_paths": ["engine/src/searcher.py"]
+  },
+  {
+    "query": "How does the search layer decide when one query embedding can be reused for both code and description vectors?",
+    "expected_paths": ["engine/src/searcher.py"]
+  },
+  {
+    "query": "How is role metadata assigned in Rust and carried into indexed vector payloads?",
+    "expected_paths": ["service/src/role_classify.rs", "engine/src/chunker.py", "engine/src/indexer.py"]
+  },
+  {
+    "query": "How does the symbol index invalidate stale persisted snapshots when the extraction schema changes?",
+    "expected_paths": ["service/src/symbol_index.rs"]
+  },
+  {
+    "query": "How does the parser CLI get routed from python -m engine without loading the full heavy CLI path?",
+    "expected_paths": ["engine/__main__.py", "engine/src/parser_cli.py", "engine/sdk.py"]
+  },
+  {
+    "query": "How are unchanged points copied into the new shadow collection during a full reindex?",
+    "expected_paths": ["engine/src/collection.py", "engine/sdk.py"]
+  },
+  {
+    "query": "How does the text search path classify file roles without tree-sitter extraction on the hot path?",
+    "expected_paths": ["service/src/structural_boost.rs", "service/src/text_search.rs"]
+  },
+  {
+    "query": "How does the Qdrant phase benchmark separate client-side latency from Qdrant server time?",
+    "expected_paths": ["scripts/search_phase_benchmark.py", "engine/src/qdrant_search.py"]
+  },
+  {
+    "query": "How are file path prefixes generated during indexing and then used during retrieval filtering?",
+    "expected_paths": ["engine/src/indexer.py", "engine/src/searcher.py"]
+  },
+  {
+    "query": "How are qualified symbol queries like Class.method ranked ahead of the parent container?",
+    "expected_paths": ["service/src/symbol_index.rs"]
+  },
+  {
+    "query": "How does the service choose its default binary path and IPC transport across Windows and Linux?",
+    "expected_paths": ["engine/src/parsing.py", "engine/src/pipe.py", "service/src/server.rs"]
+  },
+  {
+    "query": "How are duplicate chunks collapsed before embedding and then expanded back after embedding?",
+    "expected_paths": ["engine/src/dedup.py"]
+  },
+  {
+    "query": "How does the semantic search path avoid stale wrapper-heavy hits after moving QuickContext out of engine/__init__.py?",
+    "expected_paths": ["engine/src/searcher.py", "scripts/retrieval_cases_extended.json"]
+  },
+  {
+    "query": "How does the retrieval benchmark load case files and score top-rank hits against expected paths?",
+    "expected_paths": ["scripts/retrieval_benchmark.py"]
+  },
+  {
+    "query": "How does the lightweight Qdrant search client expose server-reported timing and response size for benchmarking?",
+    "expected_paths": ["engine/src/qdrant_search.py", "scripts/search_phase_benchmark.py"]
+  },
+  {
+    "query": "How do extracted symbol parents get cleaned so top-level definitions do not inherit import statements as fake parents?",
+    "expected_paths": ["service/src/extract.rs"]
+  }
+]
