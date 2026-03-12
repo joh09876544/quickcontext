@@ -187,8 +187,7 @@ fn score_and_rank(
         };
 
         let boosted_score = candidate.score * category_boost * coverage_boost * role_boost * intent_boost;
-        let lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
-        let (snippet, line_start, line_end) = extract_snippet(&lines, &candidate.matched_terms);
+        let (snippet, line_start, line_end) = extract_snippet(&content, &candidate.matched_terms);
 
         matches.push(TextSearchMatch {
             file_path: candidate.file_path.clone(),
@@ -249,8 +248,7 @@ fn score_and_rank_fast(
             None => continue,
         };
 
-        let lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
-        let (snippet, line_start, line_end) = extract_snippet(&lines, &candidate.matched_terms);
+        let (snippet, line_start, line_end) = extract_snippet(&content, &candidate.matched_terms);
 
         matches.push(TextSearchMatch {
             file_path: candidate.file_path.clone(),
@@ -427,9 +425,10 @@ fn evaluate_expr(expr: &QueryExpr, content: &str) -> bool {
 
 /// Extract a context snippet around the first matched term in the file.
 ///
-/// lines: &[String] — File lines.
+/// content: &str — File content.
 /// matched_terms: &[String] — Terms that matched in this file.
-fn extract_snippet(lines: &[String], matched_terms: &[String]) -> (String, usize, usize) {
+fn extract_snippet(content: &str, matched_terms: &[String]) -> (String, usize, usize) {
+    let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() || matched_terms.is_empty() {
         return (String::new(), 0, 0);
     }
@@ -569,15 +568,16 @@ mod tests {
 
     #[test]
     fn test_extract_snippet_basic() {
-        let lines: Vec<String> = vec![
-            "line 1".to_string(),
-            "line 2".to_string(),
-            "line 3 with auth".to_string(),
-            "line 4".to_string(),
-            "line 5".to_string(),
+        let lines = [
+            "line 1",
+            "line 2",
+            "line 3 with auth",
+            "line 4",
+            "line 5",
         ];
+        let content = lines.join("\n");
         let terms = vec!["auth".to_string()];
-        let (snippet, start, end) = extract_snippet(&lines, &terms);
+        let (snippet, start, end) = extract_snippet(&content, &terms);
         assert!(snippet.contains("auth"));
         assert!(start >= 1);
         assert!(end <= 5);
@@ -585,9 +585,9 @@ mod tests {
 
     #[test]
     fn test_extract_snippet_empty() {
-        let lines: Vec<String> = Vec::new();
+        let content = String::new();
         let terms = vec!["auth".to_string()];
-        let (snippet, start, end) = extract_snippet(&lines, &terms);
+        let (snippet, start, end) = extract_snippet(&content, &terms);
         assert!(snippet.is_empty());
         assert_eq!(start, 0);
         assert_eq!(end, 0);
