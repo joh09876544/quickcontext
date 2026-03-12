@@ -26,6 +26,7 @@ use crate::types::{
 const STATE_KEY: &str = "state";
 const SNAPSHOT_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("snapshot");
 const REFRESH_DEBOUNCE_MS: u128 = 5000;
+const SYMBOL_INDEX_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SymbolRecord {
@@ -53,6 +54,8 @@ struct CallerEdge {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedIndex {
+    #[serde(default)]
+    schema_version: u32,
     project_root: String,
     file_signatures: HashMap<String, u64>,
     symbols: Vec<SymbolRecord>,
@@ -1159,6 +1162,7 @@ fn persist_index(root: &Path, index: &ProjectIndex) -> Result<(), String> {
     let db = Database::create(&db_path).map_err(|e| format!("failed to open redb: {e}"))?;
 
     let persisted = PersistedIndex {
+        schema_version: SYMBOL_INDEX_SCHEMA_VERSION,
         project_root: index.project_root.clone(),
         file_signatures: index.file_signatures.clone(),
         symbols: index.symbols.clone(),
@@ -1202,6 +1206,9 @@ fn load_persisted_index(root: &Path) -> Result<Option<PersistedIndex>, String> {
 
     let decoded: PersistedIndex = serde_json::from_slice(raw.value())
         .map_err(|e| format!("failed to decode persisted index: {e}"))?;
+    if decoded.schema_version != SYMBOL_INDEX_SCHEMA_VERSION {
+        return Ok(None);
+    }
     Ok(Some(decoded))
 }
 

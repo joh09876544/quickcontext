@@ -466,7 +466,7 @@ pub fn extract_file(file_path: &str, source: &str, spec: &LanguageSpec) -> Extra
         let docstring = doc_text
             .map(|s| s.to_string())
             .or_else(|| extract_docstring(source, &def_node, body_node.as_ref()));
-        let parent = find_parent_name(def_node, source);
+        let parent = sanitize_parent_name(find_parent_name(def_node, source));
         let visibility = extract_visibility(source, &def_node, spec.name);
 
         result.symbols.push(ExtractedSymbol {
@@ -640,7 +640,6 @@ fn find_parent_name(node: Node, source: &str) -> Option<String> {
                 | "enum_item"
                 | "interface_declaration"
                 | "object"
-                | "program"
         );
 
         if is_container {
@@ -662,6 +661,43 @@ fn find_parent_name(node: Node, source: &str) -> Option<String> {
         }
 
         current = current.parent()?;
+    }
+}
+
+fn sanitize_parent_name(parent: Option<String>) -> Option<String> {
+    let trimmed = parent?.trim().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("from ") || trimmed.starts_with("import ") {
+        return None;
+    }
+    if trimmed.len() > 80 {
+        return None;
+    }
+    Some(trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_parent_name;
+
+    #[test]
+    fn sanitize_parent_name_drops_import_like_parents() {
+        assert_eq!(sanitize_parent_name(Some("import re".to_string())), None);
+        assert_eq!(sanitize_parent_name(Some("from os import path".to_string())), None);
+    }
+
+    #[test]
+    fn sanitize_parent_name_keeps_real_container_names() {
+        assert_eq!(
+            sanitize_parent_name(Some("CollectionManager".to_string())),
+            Some("CollectionManager".to_string())
+        );
+        assert_eq!(
+            sanitize_parent_name(Some(" QuickContext ".to_string())),
+            Some("QuickContext".to_string())
+        );
     }
 }
 
