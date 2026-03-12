@@ -1,0 +1,82 @@
+[
+  {
+    "query": "How does the Python layer decide how to connect to the Rust service on Windows versus Linux?",
+    "expected_paths": ["engine/src/parsing.py", "engine/src/pipe.py"]
+  },
+  {
+    "query": "How does full indexing avoid replacing unchanged data when it builds a shadow collection?",
+    "expected_paths": ["engine/__init__.py", "engine/src/collection.py"]
+  },
+  {
+    "query": "How are query embeddings cached or reused in the search layer for repeated searches?",
+    "expected_paths": ["engine/src/searcher.py"]
+  },
+  {
+    "query": "How does this codebase make parser-only Python commands work without requiring Qdrant imports at startup?",
+    "expected_paths": ["engine/src/parsing.py", "engine/__init__.py"]
+  },
+  {
+    "query": "How are stale chunks removed when a file changes and some chunks are filtered out?",
+    "expected_paths": ["engine/__init__.py", "engine/src/differ.py", "engine/src/indexer.py"]
+  },
+  {
+    "query": "How does the code detect unchanged files before indexing?",
+    "expected_paths": ["engine/__init__.py", "engine/src/filecache.py"]
+  },
+  {
+    "query": "Where are the text and symbol indexes stored on disk?",
+    "expected_paths": ["service/src/text_index.rs", "service/src/symbol_index.rs"]
+  },
+  {
+    "query": "How are provider dependencies loaded so one-shot CLI commands start faster?",
+    "expected_paths": ["engine/src/providers/litellm_provider.py", "engine/src/providers/fastembed_provider.py", "engine/src/providers/factory.py"]
+  },
+  {
+    "query": "How does path-scoped semantic search work in this codebase?",
+    "expected_paths": ["engine/src/searcher.py", "engine/src/indexer.py", "engine/__init__.py"]
+  },
+  {
+    "query": "How are call edges built for symbol caller tracing?",
+    "expected_paths": ["service/src/symbol_index.rs"]
+  },
+  {
+    "query": "How does the searcher hydrate lightweight vector search results back into full source snippets?",
+    "expected_paths": ["engine/src/searcher.py"]
+  },
+  {
+    "query": "How does the code build fallback descriptions when fast indexing skips LLM descriptions?",
+    "expected_paths": ["engine/src/describer.py", "engine/__init__.py"]
+  },
+  {
+    "query": "How does the search layer tokenize identifiers and expand lexical variants for ranking?",
+    "expected_paths": ["engine/src/searcher.py", "engine/src/keywords.py"]
+  },
+  {
+    "query": "How does the collection alias swap work when a new versioned collection becomes active?",
+    "expected_paths": ["engine/src/collection.py"]
+  },
+  {
+    "query": "How does the text search index refresh itself when files change?",
+    "expected_paths": ["service/src/text_index.rs", "service/src/extract.rs"]
+  },
+  {
+    "query": "How does the symbol index refresh and persist caller data for symbol lookup and call tracing?",
+    "expected_paths": ["service/src/symbol_index.rs"]
+  },
+  {
+    "query": "How are path prefixes stored in Qdrant payloads for server-side path filtering?",
+    "expected_paths": ["engine/src/indexer.py", "engine/src/searcher.py"]
+  },
+  {
+    "query": "How does the code lazily create Qdrant and embedding providers inside QuickContext?",
+    "expected_paths": ["engine/__init__.py", "engine/src/qdrant.py", "engine/src/providers/factory.py"]
+  },
+  {
+    "query": "How are duplicate chunks collapsed before embedding so repeated code does not get embedded twice?",
+    "expected_paths": ["engine/src/dedup.py", "engine/__init__.py"]
+  },
+  {
+    "query": "How does the watcher debounce file changes before triggering refresh?",
+    "expected_paths": ["engine/src/watcher.py", "engine/__init__.py"]
+  }
+]

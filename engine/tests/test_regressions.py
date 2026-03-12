@@ -293,6 +293,77 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("delete", keywords)
         self.assertIn("obsolete", keywords)
 
+    def test_query_keyword_expansion_adds_dedup_synonym_for_duplicates(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        keywords = searcher._extract_keywords_cached("How are duplicate chunks collapsed before embedding?")
+        self.assertIn("dedup", keywords)
+
+    def test_symbol_tokens_add_dedup_for_deduplicate(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        tokens = searcher._symbol_tokens("deduplicate_chunks", None)
+        self.assertIn("dedup", tokens)
+
+    def test_action_query_penalizes_result_container_symbols(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        penalty = searcher._container_symbol_penalty(
+            "TextSearchResult",
+            "class",
+            ["searcher", "hydrate", "source"],
+        )
+        neutral = searcher._container_symbol_penalty(
+            "PersistedTextIndex",
+            "struct",
+            ["text", "index", "stored"],
+        )
+        self.assertLess(penalty, 1.0)
+        self.assertEqual(neutral, 1.0)
+
+    def test_strong_basename_match_gets_bonus(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        bonus = searcher._basename_hit_bonus(
+            str(Path("service/src/text_index.rs").resolve()),
+            ["text", "index", "refresh"],
+        )
+        self.assertGreater(bonus, 0.0)
+
+    def test_action_query_boosts_matching_symbol_action(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        bonus = searcher._action_symbol_bonus(
+            ["stale", "delete", "chunks"],
+            ["delete", "file"],
+        )
+        neutral = searcher._action_symbol_bonus(
+            ["stale", "delete", "chunks"],
+            ["filter", "chunks"],
+        )
+        self.assertGreater(bonus, 0.0)
+        self.assertEqual(neutral, 0.0)
+
     def test_non_test_query_penalizes_test_paths(self) -> None:
         searcher = CodeSearcher(
             client=None,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from statistics import mean, median
 import sys
@@ -82,6 +83,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark broader architecture-question retrieval quality.")
     parser.add_argument("--config", default=None, help="Path to quickcontext config JSON. Defaults to auto-discovery.")
     parser.add_argument("--project", default=None, help="Indexed project name. Defaults to auto-detect from cwd.")
+    parser.add_argument("--cases-file", default=None, help="Optional JSON file containing benchmark cases.")
     parser.add_argument("--mode", default="hybrid", choices=("code", "desc", "hybrid"), help="Semantic search mode.")
     parser.add_argument("--limit", type=int, default=5, help="Results per query.")
     parser.add_argument("--repeats", type=int, default=1, help="Repeat the full benchmark N times.")
@@ -95,6 +97,21 @@ def _load_config(config_path: str | None) -> EngineConfig:
     if config_path:
         return EngineConfig.from_json(config_path)
     return EngineConfig.auto()
+
+
+def _load_cases(cases_file: str | None) -> tuple[EvalCase, ...]:
+    if not cases_file:
+        return DEFAULT_CASES
+
+    payload = json.loads(Path(cases_file).read_text(encoding="utf-8"))
+    cases: list[EvalCase] = []
+    for item in payload:
+        query = str(item["query"]).strip()
+        expected_paths = tuple(str(path) for path in item["expected_paths"])
+        if not query or not expected_paths:
+            continue
+        cases.append(EvalCase(query=query, expected_paths=expected_paths))
+    return tuple(cases)
 
 
 def _normalize_path(path: str) -> str:
@@ -177,11 +194,12 @@ def main() -> None:
     repo_root = Path.cwd().resolve()
     config = _load_config(args.config)
     project_name = args.project or detect_project_name(repo_root, manual_override=None)
+    cases = _load_cases(args.cases_file)
 
     all_results: list[EvalResult] = []
     with QuickContext(config) as qc:
         for _ in range(max(1, args.repeats)):
-            for case in DEFAULT_CASES:
+            for case in cases:
                 all_results.append(
                     _evaluate_case(
                         qc=qc,

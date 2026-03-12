@@ -34,6 +34,29 @@ TOKEN_SYNONYMS = {
     "delete": ("remove", "removed"),
     "stale": ("obsolete", "old"),
     "obsolete": ("stale", "old"),
+    "hydrate": ("retrieve", "payload", "source"),
+    "snippet": ("source",),
+    "snippets": ("source",),
+    "duplicate": ("dedup", "repeat"),
+    "duplicates": ("dedup", "repeat"),
+    "collapse": ("dedup",),
+    "collapsed": ("dedup",),
+    "deduplicate": ("dedup", "duplicate"),
+}
+ACTION_QUERY_KEYWORDS = {
+    "hydrate",
+    "refresh",
+    "delete",
+    "remove",
+    "detect",
+    "connect",
+    "collapse",
+    "debounce",
+    "cache",
+    "persist",
+    "create",
+    "build",
+    "expand",
 }
 LIGHT_RESULT_PAYLOAD_FIELDS = [
     "chunk_id",
@@ -715,7 +738,8 @@ class CodeSearcher:
             file_path_value = point.payload["file_path"]
             final_score *= self._kind_score_multiplier(symbol_kind_value, len(ranking_keywords))
             final_score *= self._path_signal_multiplier(file_path_value, ranking_keywords)
-
+            final_score += self._basename_hit_bonus(file_path_value, ranking_keywords)
+            final_score *= self._container_symbol_penalty(symbol_name_value, symbol_kind_value, ranking_keywords)
             if ranking_keywords:
                 symbol_tokens = self._symbol_tokens(
                     symbol_name_value,
@@ -723,6 +747,7 @@ class CodeSearcher:
                 )
                 symbol_overlap = keyword_query_coverage_score(ranking_keywords, symbol_tokens)
                 final_score += symbol_overlap * 0.18
+                final_score += self._action_symbol_bonus(ranking_keywords, symbol_tokens)
                 if len(ranking_keywords) >= 2 and symbol_overlap >= 0.5:
                     final_score *= 1.12
                 if (
@@ -993,7 +1018,8 @@ class CodeSearcher:
             file_path_value = point.payload["file_path"]
             final_score *= self._kind_score_multiplier(symbol_kind_value, len(ranking_keywords))
             final_score *= self._path_signal_multiplier(file_path_value, ranking_keywords)
-
+            final_score += self._basename_hit_bonus(file_path_value, ranking_keywords)
+            final_score *= self._container_symbol_penalty(symbol_name_value, symbol_kind_value, ranking_keywords)
             if ranking_keywords:
                 symbol_tokens = self._symbol_tokens(
                     symbol_name_value,
@@ -1001,6 +1027,7 @@ class CodeSearcher:
                 )
                 symbol_overlap = keyword_query_coverage_score(ranking_keywords, symbol_tokens)
                 final_score += symbol_overlap * 0.18
+                final_score += self._action_symbol_bonus(ranking_keywords, symbol_tokens)
                 if len(ranking_keywords) >= 2 and symbol_overlap >= 0.5:
                     final_score *= 1.12
                 if (
@@ -1433,6 +1460,59 @@ class CodeSearcher:
                 self._metadata_token_cache.popitem(last=False)
 
         return deduped
+
+    def _file_basename_tokens(self, file_path: str) -> list[str]:
+        """
+        Extract normalized tokens from the file basename.
+        """
+        return self._identifier_tokens(Path(file_path).stem, max_tokens=6)
+
+    def _basename_hit_bonus(self, file_path: str, ranking_keywords: list[str]) -> float:
+        """
+        Reward strong basename matches for subsystem-specific queries.
+        """
+        hits = len(set(ranking_keywords) & set(self._file_basename_tokens(file_path)))
+        if hits < 2:
+            return 0.0
+        return hits * 0.08
+
+    def _container_symbol_penalty(
+        self,
+        symbol_name: str,
+        symbol_kind: str,
+        ranking_keywords: list[str],
+    ) -> float:
+        """
+        Down-rank generic result container symbols on action-heavy questions.
+        """
+        if not ranking_keywords:
+            return 1.0
+
+        if not set(ranking_keywords).intersection(ACTION_QUERY_KEYWORDS):
+            return 1.0
+
+        kind = (symbol_kind or "").lower()
+        if kind not in {"class", "struct"}:
+            return 1.0
+
+        suffixes = ("result", "results", "item", "items", "config", "stats", "record")
+        if symbol_name.lower().endswith(suffixes):
+            return 0.72
+        return 1.0
+
+    def _action_symbol_bonus(self, ranking_keywords: list[str], symbol_tokens: list[str]) -> float:
+        """
+        Reward symbols whose action words match the query intent.
+        """
+        if not ranking_keywords or not symbol_tokens:
+            return 0.0
+
+        query_actions = set(ranking_keywords).intersection(ACTION_QUERY_KEYWORDS)
+        if not query_actions:
+            return 0.0
+
+        action_hits = len(query_actions & set(symbol_tokens))
+        return action_hits * 0.08
 
     def _symbol_tokens(self, symbol_name: str, signature: Optional[str]) -> list[str]:
         """
