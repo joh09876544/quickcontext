@@ -263,6 +263,17 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("provider", tokens)
         self.assertIn("cached", tokens)
 
+    def test_query_keyword_expansion_adds_delete_synonym_for_removed(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        keywords = searcher._extract_keywords_cached("How are stale chunks removed?")
+        self.assertIn("delete", keywords)
+        self.assertIn("obsolete", keywords)
+
     def test_non_test_query_penalizes_test_paths(self) -> None:
         searcher = CodeSearcher(
             client=None,

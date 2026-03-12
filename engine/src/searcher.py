@@ -29,6 +29,12 @@ TOP_RANK_BONUS_2_3 = 0.02
 QUERY_CACHE_SIZE = 256
 DISK_QUERY_CACHE_LIMIT = 512
 METADATA_TOKEN_CACHE_SIZE = 2048
+TOKEN_SYNONYMS = {
+    "remove": ("delete", "deletion"),
+    "delete": ("remove", "removed"),
+    "stale": ("obsolete", "old"),
+    "obsolete": ("stale", "old"),
+}
 LIGHT_RESULT_PAYLOAD_FIELDS = [
     "chunk_id",
     "language",
@@ -1340,6 +1346,11 @@ class CodeSearcher:
                 continue
             seen.add(candidate)
             out.append(candidate)
+            for synonym in TOKEN_SYNONYMS.get(candidate, ()):
+                if len(synonym) < 3 or synonym in seen:
+                    continue
+                seen.add(synonym)
+                out.append(synonym)
         return out
 
     def _identifier_tokens(self, text: str, max_tokens: Optional[int] = None) -> list[str]:
