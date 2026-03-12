@@ -75,6 +75,7 @@ class _FakeClient:
         self._records = records or []
         self.last_query_with_payload = None
         self.last_retrieve_with_payload = None
+        self.retrieve_calls = 0
 
     def query_points(self, **kwargs):
         self.last_query_with_payload = kwargs.get("with_payload")
@@ -85,6 +86,7 @@ class _FakeClient:
 
     def retrieve(self, **kwargs):
         self.last_retrieve_with_payload = kwargs.get("with_payload")
+        self.retrieve_calls += 1
         return self._records
 
 
@@ -496,6 +498,35 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(client.last_query_with_payload, LIGHT_RESULT_PAYLOAD_FIELDS)
         self.assertIsNotNone(client.last_retrieve_with_payload)
         self.assertEqual(results[0].source, full_payload["source"])
+
+    def test_search_skips_hydration_when_source_not_requested(self) -> None:
+        payload = {
+            "file_path": str(Path("engine/src/searcher.py").resolve()),
+            "symbol_name": "_embed_query_cached",
+            "symbol_kind": "function",
+            "line_start": 10,
+            "line_end": 20,
+            "description": "Cache query embeddings for repeated searches.",
+            "keywords": ["query", "embedding", "cache"],
+            "path_context": "engine / src / searcher.py",
+        }
+        client = _FakeClient([_FakePoint(0.8, payload, point_id="point-1")])
+        searcher = CodeSearcher(
+            client=client,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+
+        results = searcher.search_code(
+            query="How are query embeddings cached or reused in the search layer for repeated searches?",
+            limit=1,
+            use_keywords=False,
+            include_source=False,
+        )
+
+        self.assertEqual(client.retrieve_calls, 0)
+        self.assertEqual(results[0].source, "")
 
     def test_qdrant_connect_skips_eager_verification_by_default(self) -> None:
         fake_client = mock.Mock()

@@ -169,6 +169,7 @@ class CodeSearcher:
         use_keywords: bool = False,
         keyword_weight: float = 0.3,
         rerank: bool = False,
+        include_source: bool = True,
     ) -> list[SearchResult]:
         """
         Search by code similarity (exact semantic matching).
@@ -204,6 +205,7 @@ class CodeSearcher:
             blend_keywords=blend_keywords,
             keyword_weight=keyword_weight,
             rerank=rerank,
+            include_source=include_source,
         )
 
     def search_description(
@@ -217,6 +219,7 @@ class CodeSearcher:
         use_keywords: bool = False,
         keyword_weight: float = 0.3,
         rerank: bool = False,
+        include_source: bool = True,
     ) -> list[SearchResult]:
         """
         Search by description similarity (conceptual/intent matching).
@@ -252,6 +255,7 @@ class CodeSearcher:
             blend_keywords=blend_keywords,
             keyword_weight=keyword_weight,
             rerank=rerank,
+            include_source=include_source,
         )
 
     def search_hybrid(
@@ -274,6 +278,7 @@ class CodeSearcher:
         rerank_top10_retrieval_weight: float = 0.60,
         rerank_tail_retrieval_weight: float = 0.40,
         rerank_candidate_multiplier: int = 4,
+        include_source: bool = True,
     ) -> list[SearchResult]:
         """
         Hybrid search using RRF fusion across code and description spaces.
@@ -360,7 +365,7 @@ class CodeSearcher:
                 candidate_multiplier=rerank_candidate_multiplier,
             )
 
-        return self._hydrate_results(fused[:limit])
+        return self._finalize_results(fused[:limit], include_source=include_source)
 
     def search_structured(
         self,
@@ -381,6 +386,7 @@ class CodeSearcher:
         rerank_top10_retrieval_weight: float = 0.60,
         rerank_tail_retrieval_weight: float = 0.40,
         rerank_candidate_multiplier: int = 4,
+        include_source: bool = True,
     ) -> list[SearchResult]:
         """
         Structured search across typed sub-queries with RRF fusion.
@@ -470,7 +476,7 @@ class CodeSearcher:
                 candidate_multiplier=rerank_candidate_multiplier,
             )
 
-        return self._hydrate_results(fused[:limit])
+        return self._finalize_results(fused[:limit], include_source=include_source)
 
     def _result_key(self, result: SearchResult) -> str:
         """
@@ -616,6 +622,7 @@ class CodeSearcher:
         blend_keywords: list[str],
         keyword_weight: float,
         rerank: bool = False,
+        include_source: bool = True,
     ) -> list[SearchResult]:
         """
         Internal search implementation.
@@ -784,7 +791,7 @@ class CodeSearcher:
         if rerank_active:
             return self._blend_with_rerank(query, search_results, limit)
 
-        return self._hydrate_results(search_results[:limit])
+        return self._finalize_results(search_results[:limit], include_source=include_source)
 
     def _batch_search(self, requests: list[dict]) -> list[list[SearchResult]]:
         """
@@ -1107,6 +1114,14 @@ class CodeSearcher:
             )
 
         return hydrated
+
+    def _finalize_results(self, results: list[SearchResult], include_source: bool) -> list[SearchResult]:
+        """
+        Optionally hydrate source content for final results.
+        """
+        if not include_source:
+            return results
+        return self._hydrate_results(results)
 
     def _can_share_query_embedding(self) -> bool:
         """

@@ -762,6 +762,7 @@ def search(
         from engine.src.query_dsl import looks_like_structured_query, parse_structured_query
 
         use_structured = structured or looks_like_structured_query(query)
+        include_source = show_source or max_tokens is not None
         if use_structured:
             sub_queries = parse_structured_query(query)
             results = searcher.search_structured(
@@ -781,12 +782,13 @@ def search(
                 rerank_top10_retrieval_weight=rerank_top10_weight,
                 rerank_tail_retrieval_weight=rerank_tail_weight,
                 rerank_candidate_multiplier=rerank_candidate_multiplier,
+                include_source=include_source,
             )
             mode = "structured"
         elif mode == "code":
-            results = searcher.search_code(query=query, limit=limit, language=language, path_prefix=path, symbol_kind=symbol_kind, use_keywords=use_keywords, keyword_weight=keyword_weight, rerank=rerank)
+            results = searcher.search_code(query=query, limit=limit, language=language, path_prefix=path, symbol_kind=symbol_kind, use_keywords=use_keywords, keyword_weight=keyword_weight, rerank=rerank, include_source=include_source)
         elif mode == "desc":
-            results = searcher.search_description(query=query, limit=limit, language=language, path_prefix=path, symbol_kind=symbol_kind, use_keywords=use_keywords, keyword_weight=keyword_weight, rerank=rerank)
+            results = searcher.search_description(query=query, limit=limit, language=language, path_prefix=path, symbol_kind=symbol_kind, use_keywords=use_keywords, keyword_weight=keyword_weight, rerank=rerank, include_source=include_source)
         elif bias is not None:
             results = searcher.search_hybrid(
                 query=query,
@@ -806,6 +808,7 @@ def search(
                 rerank_top10_retrieval_weight=rerank_top10_weight,
                 rerank_tail_retrieval_weight=rerank_tail_weight,
                 rerank_candidate_multiplier=rerank_candidate_multiplier,
+                include_source=include_source,
             )
         else:
             results = searcher.search_hybrid(
@@ -824,6 +827,7 @@ def search(
                 rerank_top10_retrieval_weight=rerank_top10_weight,
                 rerank_tail_retrieval_weight=rerank_tail_weight,
                 rerank_candidate_multiplier=rerank_candidate_multiplier,
+                include_source=include_source,
             )
 
             if not results:
