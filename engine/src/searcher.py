@@ -801,6 +801,7 @@ class CodeSearcher:
                 symbol_kind=request["symbol_kind"],
                 ranking_keywords=request["ranking_keywords"],
                 rerank=False,
+                apply_keyword_overfetch=False,
             )
             query_requests.append(
                 models.QueryRequest(
@@ -871,6 +872,7 @@ class CodeSearcher:
         symbol_kind: Optional[str],
         ranking_keywords: list[str],
         rerank: bool,
+        apply_keyword_overfetch: bool = True,
     ) -> tuple[Optional[models.Filter], Optional[str], int]:
         """
         Build Qdrant filter and fetch sizing for a search request.
@@ -927,13 +929,14 @@ class CodeSearcher:
         rerank_active = rerank and self._reranker is not None
         if rerank_active:
             fetch_limit = limit * 5
-        elif ranking_keywords:
+        elif ranking_keywords and apply_keyword_overfetch:
             fetch_limit = limit * 3
         else:
             fetch_limit = limit
 
         if normalized_path_prefix:
-            fetch_limit = max(fetch_limit, limit * 10)
+            path_fetch_floor = limit * 10 if apply_keyword_overfetch else max(limit * 2, 40)
+            fetch_limit = max(fetch_limit, path_fetch_floor)
 
         return query_filter, normalized_path_prefix, fetch_limit
 
@@ -1081,6 +1084,7 @@ class CodeSearcher:
             return results
 
         payload_by_id = {str(record.id): record.payload or {} for record in records}
+
         hydrated: list[SearchResult] = []
         for result in results:
             payload = payload_by_id.get(str(result.point_id)) if result.point_id is not None else None

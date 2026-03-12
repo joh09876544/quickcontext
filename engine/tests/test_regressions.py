@@ -250,6 +250,25 @@ class RegressionTests(unittest.TestCase):
         must_conditions = query_filter.must or []
         self.assertTrue(any(getattr(cond, "key", None) == "path_prefixes" for cond in must_conditions))
 
+    def test_batch_query_filter_does_not_reapply_keyword_overfetch(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        _, _, fetch_limit = searcher._build_query_filter(
+            limit=30,
+            language=None,
+            file_path=None,
+            path_prefix=None,
+            symbol_kind=None,
+            ranking_keywords=["query", "cache", "search"],
+            rerank=False,
+            apply_keyword_overfetch=False,
+        )
+        self.assertEqual(fetch_limit, 30)
+
     def test_symbol_tokens_split_snake_case_identifiers(self) -> None:
         searcher = CodeSearcher(
             client=None,
