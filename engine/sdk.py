@@ -1412,18 +1412,20 @@ class QuickContext:
         project = project_name if project_name else detect_project_name(Path.cwd(), manual_override=None)
         symbol_query = self._extract_symbol_query_candidate(query)
         if symbol_query:
+            expand_symbol_context = self._should_expand_symbol_context_results(query)
             results = self._symbol_lookup_search_results(
                 query=symbol_query,
-                limit=limit,
+                limit=1 if expand_symbol_context else limit,
                 language=language,
                 path_prefix=path_prefix,
             )
             if results:
-                results = self._expand_symbol_context_results(
-                    query=query,
-                    results=results,
-                    limit=limit,
-                )
+                if expand_symbol_context:
+                    results = self._expand_symbol_context_results(
+                        query=query,
+                        results=results,
+                        limit=limit,
+                    )
                 if self._should_use_bundle_for_query(query):
                     return {
                         "query": query,
