@@ -1420,6 +1420,105 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual([item.symbol_name for item in expanded], ["search_hybrid", "CodeSearcher"])
 
+    def test_expand_symbol_context_results_penalizes_postprocess_helpers_for_fuse_query(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            anchor = SearchResult(
+                1.0,
+                str(Path("engine/src/searcher.py").resolve()),
+                "search_structured",
+                "function",
+                391,
+                509,
+                "batch_results = self._batch_search(requests)\n"
+                "fused = self._rrf_fuse(result_lists, filtered_weights)\n"
+                "if rerank_active:\n"
+                "    return self._blend_with_rerank(query, fused, limit)\n"
+                "diversified = self._diversify_results(fused, broad_keywords, limit)\n"
+                "return self._finalize_results(diversified, include_source=True)",
+                "Structured search across typed sub-queries with RRF fusion.",
+                parent="CodeSearcher",
+                language="python",
+            )
+            extraction = _Extraction(
+                file_path=str(Path("engine/src/searcher.py").resolve()),
+                language="python",
+                symbols=[
+                    _Symbol(
+                        name="_rrf_fuse",
+                        kind="function",
+                        language="python",
+                        file_path=str(Path("engine/src/searcher.py").resolve()),
+                        line_start=520,
+                        line_end=571,
+                        byte_start=0,
+                        byte_end=10,
+                        source="def _rrf_fuse(self, results, weights): ...",
+                        signature="_rrf_fuse(self, results, weights)",
+                        parent="CodeSearcher",
+                    ),
+                    _Symbol(
+                        name="_batch_search",
+                        kind="function",
+                        language="python",
+                        file_path=str(Path("engine/src/searcher.py").resolve()),
+                        line_start=839,
+                        line_end=922,
+                        byte_start=0,
+                        byte_end=10,
+                        source="def _batch_search(self, requests): ...",
+                        signature="_batch_search(self, requests)",
+                        parent="CodeSearcher",
+                    ),
+                    _Symbol(
+                        name="_blend_with_rerank",
+                        kind="function",
+                        language="python",
+                        file_path=str(Path("engine/src/searcher.py").resolve()),
+                        line_start=573,
+                        line_end=639,
+                        byte_start=0,
+                        byte_end=10,
+                        source="def _blend_with_rerank(self, query, fused, limit): ...",
+                        signature="_blend_with_rerank(self, query, fused, limit)",
+                        parent="CodeSearcher",
+                    ),
+                    _Symbol(
+                        name="_finalize_results",
+                        kind="function",
+                        language="python",
+                        file_path=str(Path("engine/src/searcher.py").resolve()),
+                        line_start=1173,
+                        line_end=1179,
+                        byte_start=0,
+                        byte_end=10,
+                        source="def _finalize_results(self, results, include_source): ...",
+                        signature="_finalize_results(self, results, include_source)",
+                        parent="CodeSearcher",
+                    ),
+                ],
+            )
+            with mock.patch.object(qc, "_load_file_symbols", return_value=extraction.symbols):
+                expanded = qc._expand_symbol_context_results(
+                    "How does CodeSearcher.search_structured fuse typed sub-queries?",
+                    [anchor],
+                    limit=4,
+                )
+        finally:
+            qc.close()
+
+        names = [item.symbol_name for item in expanded]
+        self.assertEqual(names[:3], ["search_structured", "_rrf_fuse", "_batch_search"])
+        self.assertNotIn("_finalize_results", names[:3])
+
     def test_semantic_search_bundle_can_skip_graph_related_expansion(self) -> None:
         qc = QuickContext(
             EngineConfig(

@@ -1825,8 +1825,8 @@ class QuickContext:
                 1 if mentioned else 0,
                 1 if same_parent else 0,
                 query_overlap,
-                reference_overlap,
                 -mismatch_penalty,
+                reference_overlap,
                 1 if container_match else 0,
                 -line_distance,
                 symbol.name,
@@ -1895,6 +1895,7 @@ class QuickContext:
             "embedding": ({"embed", "embedding", "cached", "cache"}, 2),
             "limit": ({"limit", "request", "requests", "threshold", "budget"}, 1),
             "keyword": ({"keyword", "keywords"}, 1),
+            "postprocess": ({"finalize", "final", "diversify", "hydrate", "hydration", "postprocess"}, 2),
             "legacy": ({"legacy"}, 2),
         }
         penalty = 0
