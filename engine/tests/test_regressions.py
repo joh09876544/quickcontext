@@ -1289,6 +1289,84 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(payload["related_files"][0]["file_path"], str(Path("engine/src/pipe.py").resolve()))
         self.assertEqual(payload["related_files"][0]["relations"][0]["relation"], "lexical_neighbor")
 
+    def test_retrieve_context_auto_adds_graph_lexical_related_files_for_graph_query(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            semantic_result = SearchResult(
+                1.0,
+                str(Path("engine/src/parsing.py").resolve()),
+                "import_graph",
+                "function",
+                1,
+                10,
+                "def import_graph(...): ...",
+                "import_graph(file, path)",
+                parent=None,
+                language="python",
+            )
+            base_text_match = type(
+                "TextMatch",
+                (),
+                {
+                    "file_path": str(Path("engine/src/pipe.py").resolve()),
+                    "language": "python",
+                    "snippet_line_start": 12,
+                    "matched_terms": ["importers", "dependencies"],
+                    "score": 8.0,
+                },
+            )()
+            graph_text_match = type(
+                "TextMatch",
+                (),
+                {
+                    "file_path": str(Path("service/src/import_graph.rs").resolve()),
+                    "language": "rust",
+                    "snippet_line_start": 44,
+                    "matched_terms": ["importers", "graph", "dependencies"],
+                    "score": 9.0,
+                },
+            )()
+            with mock.patch.object(
+                qc,
+                "semantic_search_auto",
+                return_value={
+                    "query": "x",
+                    "project_name": "p",
+                    "mode": "search",
+                    "results": [semantic_result],
+                    "related_files": [],
+                    "related_callers": [],
+                },
+            ), mock.patch.object(
+                qc,
+                "_should_use_text_primary_for_query",
+                return_value=False,
+            ), mock.patch.object(
+                qc,
+                "text_search",
+                side_effect=[
+                    type("TextResult", (), {"matches": [base_text_match]})(),
+                    type("TextResult", (), {"matches": [graph_text_match]})(),
+                ],
+            ):
+                payload = qc.retrieve_context_auto(
+                    "Which files import this module and what dependencies does it have?"
+                )
+        finally:
+            qc.close()
+
+        relations = {item["relations"][0]["relation"] for item in payload["related_files"]}
+        self.assertIn("graph_lexical_neighbor", relations)
+        self.assertIn(str(Path("service/src/import_graph.rs").resolve()), {item["file_path"] for item in payload["related_files"]})
+
     def test_retrieve_context_auto_routes_non_symbol_query_to_text_primary(self) -> None:
         qc = QuickContext(
             EngineConfig(

@@ -1510,11 +1510,30 @@ class QuickContext:
         )
         payload["symbol_query"] = None
         if payload.get("mode") == "search":
-            payload["related_files"] = self._lexical_related_files_for_query(
+            lexical_related = self._lexical_related_files_for_query(
                 query=query,
                 results=payload["results"],
                 related_file_limit=related_file_limit,
             )
+            if self._should_add_graph_lexical_companions(query):
+                graph_related = self._graph_lexical_related_files_for_query(
+                    query=query,
+                    results=payload["results"],
+                    existing_related=lexical_related,
+                    related_file_limit=related_file_limit,
+                )
+                reserved_graph = graph_related[:1]
+                seen_graph_paths = {entry["file_path"] for entry in reserved_graph}
+                payload["related_files"] = reserved_graph + [
+                    item for item in lexical_related
+                    if item["file_path"] not in seen_graph_paths
+                ] + [
+                    item for item in graph_related[1:]
+                    if item["file_path"] not in {entry["file_path"] for entry in lexical_related}
+                ]
+                payload["related_files"] = payload["related_files"][:related_file_limit]
+            else:
+                payload["related_files"] = lexical_related
         return payload
 
     def structured_search(
@@ -1790,6 +1809,97 @@ class QuickContext:
             if len(related) >= related_file_limit:
                 break
         return related
+
+    def _graph_lexical_related_files_for_query(
+        self,
+        query: str,
+        results: list,
+        existing_related: list[dict],
+        related_file_limit: int,
+    ) -> list[dict]:
+        """
+        Add graph-oriented lexical companions for dependency and caller style queries.
+        """
+        if related_file_limit <= 0:
+            return []
+
+        graph_query = self._graph_companion_query(query)
+        if not graph_query:
+            return []
+
+        excluded_paths = {
+            str(getattr(item, "file_path", ""))
+            for item in results
+            if getattr(item, "file_path", None)
+        }
+        excluded_paths.update(item["file_path"] for item in existing_related)
+
+        try:
+            text_result = self.text_search(
+                query=graph_query,
+                path=Path.cwd(),
+                limit=max(related_file_limit * 4, 12),
+                intent_mode=True,
+                intent_level=2,
+            )
+        except Exception:
+            return []
+
+        related: list[dict] = []
+        for item in text_result.matches:
+            file_path = str(item.file_path).replace("\\\\?\\", "")
+            if file_path in excluded_paths:
+                continue
+            if self._should_skip_lexical_related_path(query, file_path):
+                continue
+            excluded_paths.add(file_path)
+            related.append(
+                {
+                    "file_path": file_path,
+                    "distance": 1,
+                    "relations": [
+                        {
+                            "relation": "graph_lexical_neighbor",
+                            "seed_file": "",
+                            "module_path": "",
+                            "language": item.language,
+                            "line": item.snippet_line_start,
+                        }
+                    ],
+                }
+            )
+            if len(related) >= related_file_limit:
+                break
+        return related
+
+    def _graph_companion_query(self, query: str) -> str:
+        """
+        Build a condensed lexical query for graph- and dependency-oriented questions.
+        """
+        keywords = set(extract_keywords(query, max_keywords=20))
+        if not keywords:
+            return ""
+
+        terms: list[str] = []
+        seen: set[str] = set()
+
+        def add(*values: str) -> None:
+            for value in values:
+                if value in seen:
+                    continue
+                seen.add(value)
+                terms.append(value)
+
+        if keywords.intersection({"import", "imports", "importer", "importers", "module", "dependency", "dependencies", "neighbor", "neighbors"}):
+            add("import", "imports", "importers", "graph", "dependencies", "module")
+        if keywords.intersection({"call", "calls", "caller", "callers", "trace", "tracing", "traversal", "lookup", "edges"}):
+            add("call", "caller", "lookup", "graph", "edges", "trace")
+
+        return " ".join(terms)
+
+    def _should_add_graph_lexical_companions(self, query: str) -> bool:
+        keywords = set(extract_keywords(query, max_keywords=20))
+        return bool(keywords.intersection({"dependency", "dependencies", "module", "imports", "importers", "neighbors"}))
 
     def _text_matches_to_search_results(self, matches: list[TextSearchMatch]) -> list:
         """
