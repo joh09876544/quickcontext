@@ -1453,7 +1453,10 @@ class QuickContext:
                     "related_callers": [],
                 }
 
-        if not self._should_use_bundle_for_query(query):
+        should_use_bundle = self._should_use_bundle_for_query(query)
+        should_use_graph_related = self._should_use_graph_related_for_query(query)
+
+        if not should_use_graph_related:
             try:
                 text_result = self.text_search(
                     query=query,
@@ -1472,6 +1475,25 @@ class QuickContext:
                     limit=limit,
                     related_file_limit=related_file_limit,
                 )
+
+        if should_use_bundle:
+            bundle = self.semantic_search_bundle(
+                query=query,
+                mode=mode,
+                limit=limit,
+                language=language,
+                path_prefix=path_prefix,
+                project_name=project,
+                use_keywords=use_keywords,
+                keyword_weight=keyword_weight,
+                rerank=rerank,
+                related_seed_files=related_seed_files,
+                related_file_limit=related_file_limit,
+                include_graph_related=should_use_graph_related,
+            )
+            bundle["mode"] = "bundle"
+            bundle["symbol_query"] = None
+            return bundle
 
         payload = self.semantic_search_auto(
             query=query,

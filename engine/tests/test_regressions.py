@@ -1348,6 +1348,67 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(payload["results"][0].file_path, str(Path("engine/src/pipe.py").resolve()))
         self.assertEqual(payload["related_files"][0]["file_path"], str(Path("engine/src/parsing.py").resolve()))
 
+    def test_retrieve_context_auto_routes_non_graph_bundle_query_to_text_primary(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            text_matches = [
+                type(
+                    "TextMatch",
+                    (),
+                    {
+                        "file_path": str(Path("engine/sdk.py").resolve()),
+                        "language": "python",
+                        "snippet_line_start": 2923,
+                        "snippet_line_end": 2947,
+                        "snippet": "shadow_name = collection.create_shadow()",
+                        "matched_terms": ["full", "indexing", "unchanged", "shadow", "collection"],
+                        "score": 18.0,
+                    },
+                )(),
+                type(
+                    "TextMatch",
+                    (),
+                    {
+                        "file_path": str(Path("engine/src/collection.py").resolve()),
+                        "language": "python",
+                        "snippet_line_start": 323,
+                        "snippet_line_end": 333,
+                        "snippet": "def create_shadow(self) -> str:",
+                        "matched_terms": ["shadow", "collection"],
+                        "score": 17.0,
+                    },
+                )(),
+            ]
+            with mock.patch.object(
+                qc,
+                "text_search",
+                return_value=type("TextResult", (), {"matches": text_matches})(),
+            ), mock.patch.object(
+                qc,
+                "semantic_search_bundle",
+                side_effect=AssertionError("semantic_search_bundle should not run when strong lexical path is enough"),
+            ):
+                payload = qc.retrieve_context_auto(
+                    "How does full indexing avoid replacing unchanged data when it builds a shadow collection?",
+                    limit=2,
+                )
+        finally:
+            qc.close()
+
+        self.assertEqual(payload["mode"], "text")
+        self.assertEqual(
+            [Path(item.file_path).resolve() for item in payload["results"]],
+            [Path("engine/sdk.py").resolve(), Path("engine/src/collection.py").resolve()],
+        )
+
     def test_retrieve_context_auto_uses_symbol_bundle_for_broad_symbol_queries(self) -> None:
         qc = QuickContext(
             EngineConfig(
