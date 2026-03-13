@@ -1210,6 +1210,10 @@ class RegressionTests(unittest.TestCase):
         try:
             with mock.patch.object(qc, "_symbol_lookup_search_results", return_value=[]), mock.patch.object(
                 qc,
+                "text_search",
+                return_value=type("TextResult", (), {"matches": []})(),
+            ), mock.patch.object(
+                qc,
                 "semantic_search_auto",
                 return_value={"query": "x", "project_name": "p", "mode": "search", "results": ["semantic"], "related_files": [], "related_callers": []},
             ) as semantic_auto:
@@ -1267,6 +1271,10 @@ class RegressionTests(unittest.TestCase):
                 },
             ), mock.patch.object(
                 qc,
+                "_should_use_text_primary_for_query",
+                return_value=False,
+            ), mock.patch.object(
+                qc,
                 "text_search",
                 return_value=type("TextResult", (), {"matches": [text_match]})(),
             ):
@@ -1280,6 +1288,65 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(len(payload["related_files"]), 1)
         self.assertEqual(payload["related_files"][0]["file_path"], str(Path("engine/src/pipe.py").resolve()))
         self.assertEqual(payload["related_files"][0]["relations"][0]["relation"], "lexical_neighbor")
+
+    def test_retrieve_context_auto_routes_non_symbol_query_to_text_primary(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            text_matches = [
+                type(
+                    "TextMatch",
+                    (),
+                    {
+                        "file_path": str(Path("engine/src/pipe.py").resolve()),
+                        "language": "python",
+                        "snippet_line_start": 12,
+                        "snippet_line_end": 18,
+                        "snippet": "def connect(...): ...",
+                        "matched_terms": ["python", "connect", "windows", "linux"],
+                        "score": 12.0,
+                    },
+                )(),
+                type(
+                    "TextMatch",
+                    (),
+                    {
+                        "file_path": str(Path("engine/src/parsing.py").resolve()),
+                        "language": "python",
+                        "snippet_line_start": 24,
+                        "snippet_line_end": 31,
+                        "snippet": "class RustParserService: ...",
+                        "matched_terms": ["python", "rust", "service"],
+                        "score": 10.0,
+                    },
+                )(),
+            ]
+            with mock.patch.object(
+                qc,
+                "text_search",
+                return_value=type("TextResult", (), {"matches": text_matches})(),
+            ), mock.patch.object(
+                qc,
+                "semantic_search_auto",
+                side_effect=AssertionError("semantic_search_auto should not run for text-primary route"),
+            ):
+                payload = qc.retrieve_context_auto(
+                    "How does the Python layer decide how to connect to the Rust service on Windows versus Linux?",
+                    limit=1,
+                )
+        finally:
+            qc.close()
+
+        self.assertEqual(payload["mode"], "text")
+        self.assertEqual(payload["results"][0].file_path, str(Path("engine/src/pipe.py").resolve()))
+        self.assertEqual(payload["related_files"][0]["file_path"], str(Path("engine/src/parsing.py").resolve()))
 
     def test_retrieve_context_auto_uses_symbol_bundle_for_broad_symbol_queries(self) -> None:
         qc = QuickContext(

@@ -1453,6 +1453,26 @@ class QuickContext:
                     "related_callers": [],
                 }
 
+        if not self._should_use_bundle_for_query(query):
+            try:
+                text_result = self.text_search(
+                    query=query,
+                    path=Path.cwd(),
+                    limit=max(limit + related_file_limit, 8),
+                    intent_mode=True,
+                    intent_level=2,
+                )
+            except Exception:
+                text_result = None
+            if text_result and self._should_use_text_primary_for_query(query, text_result):
+                return self._text_primary_payload(
+                    query=query,
+                    project_name=project,
+                    text_result=text_result,
+                    limit=limit,
+                    related_file_limit=related_file_limit,
+                )
+
         payload = self.semantic_search_auto(
             query=query,
             mode=mode,
@@ -1569,6 +1589,88 @@ class QuickContext:
 
         return "\n".join(lines)
 
+    def _should_use_text_primary_for_query(self, query: str, text_result: TextSearchResult) -> bool:
+        """
+        Decide when Rust text search is strong enough to become the primary result set.
+        """
+        if not text_result.matches:
+            return False
+
+        top = text_result.matches[0]
+        if self._should_skip_lexical_related_path(query, top.file_path):
+            return False
+
+        query_keywords = set(extract_keywords(query, max_keywords=20))
+        lexical_hits = len(top.matched_terms)
+        if lexical_hits >= 4:
+            return True
+
+        if query_keywords:
+            matched = {term.lower() for term in top.matched_terms}
+            if len(query_keywords.intersection(matched)) >= 3:
+                return True
+
+        return False
+
+    def _text_primary_payload(
+        self,
+        query: str,
+        project_name: str,
+        text_result: TextSearchResult,
+        limit: int,
+        related_file_limit: int,
+    ) -> dict:
+        """
+        Build an AI-facing payload from Rust text search results.
+        """
+        primary_matches, related_matches = self._split_text_matches_for_query(
+            query=query,
+            matches=text_result.matches,
+            limit=limit,
+        )
+        return {
+            "query": query,
+            "project_name": project_name,
+            "mode": "text",
+            "symbol_query": None,
+            "results": self._text_matches_to_search_results(primary_matches),
+            "related_files": self._text_matches_to_related_files(
+                query=query,
+                matches=related_matches,
+                related_file_limit=related_file_limit,
+                excluded_paths={str(item.file_path) for item in primary_matches},
+            ),
+            "related_callers": [],
+        }
+
+    def _split_text_matches_for_query(
+        self,
+        query: str,
+        matches: list[TextSearchMatch],
+        limit: int,
+    ) -> tuple[list[TextSearchMatch], list[TextSearchMatch]]:
+        """
+        Keep the strongest text hit first, then fill remaining primary slots with filtered matches.
+        """
+        if not matches:
+            return [], []
+
+        primary: list[TextSearchMatch] = [matches[0]]
+        related_pool: list[TextSearchMatch] = []
+        seen_paths = {str(matches[0].file_path)}
+
+        for item in matches[1:]:
+            file_path = str(item.file_path)
+            if file_path in seen_paths:
+                continue
+            seen_paths.add(file_path)
+            if len(primary) < max(limit, 1) and not self._should_skip_lexical_related_path(query, file_path):
+                primary.append(item)
+                continue
+            related_pool.append(item)
+
+        return primary, related_pool
+
     def _should_expand_symbol_context_results(self, query: str) -> bool:
         """
         Detect exact-symbol questions that need helper-level implementation context.
@@ -1648,6 +1750,77 @@ class QuickContext:
             if self._should_skip_lexical_related_path(query, file_path):
                 continue
             excluded_paths.add(file_path)
+            related.append(
+                {
+                    "file_path": file_path,
+                    "distance": 1,
+                    "relations": [
+                        {
+                            "relation": "lexical_neighbor",
+                            "seed_file": "",
+                            "module_path": "",
+                            "language": item.language,
+                            "line": item.snippet_line_start,
+                        }
+                    ],
+                }
+            )
+            if len(related) >= related_file_limit:
+                break
+        return related
+
+    def _text_matches_to_search_results(self, matches: list[TextSearchMatch]) -> list:
+        """
+        Convert Rust text-search matches into SearchResult rows for AI-facing payloads.
+        """
+        from engine.src.searcher import SearchResult
+
+        results: list[SearchResult] = []
+        seen: set[tuple[str, int, int]] = set()
+        for item in matches:
+            file_path = str(item.file_path).replace("\\\\?\\", "")
+            key = (file_path, int(item.snippet_line_start), int(item.snippet_line_end))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(
+                SearchResult(
+                    score=float(item.score),
+                    file_path=file_path,
+                    symbol_name=Path(file_path).name,
+                    symbol_kind="file_match",
+                    line_start=int(item.snippet_line_start),
+                    line_end=int(item.snippet_line_end),
+                    source=item.snippet,
+                    description=item.snippet,
+                    language=item.language,
+                    path_context=self._build_symbol_path_context(file_path),
+                )
+            )
+        return results
+
+    def _text_matches_to_related_files(
+        self,
+        query: str,
+        matches: list[TextSearchMatch],
+        related_file_limit: int,
+        excluded_paths: set[str],
+    ) -> list[dict]:
+        """
+        Convert trailing Rust text-search matches into related-file payloads.
+        """
+        if related_file_limit <= 0:
+            return []
+
+        related: list[dict] = []
+        seen_paths = set(excluded_paths)
+        for item in matches:
+            file_path = str(item.file_path).replace("\\\\?\\", "")
+            if file_path in seen_paths:
+                continue
+            if self._should_skip_lexical_related_path(query, file_path):
+                continue
+            seen_paths.add(file_path)
             related.append(
                 {
                     "file_path": file_path,
