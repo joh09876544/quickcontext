@@ -12,7 +12,7 @@ use crate::text_index::{search_candidates, IndexedCandidate};
 use crate::types::{TextSearchMatch, TextSearchResult};
 
 const SNIPPET_CONTEXT_LINES: usize = 3;
-const TOOLING_FILE_PENALTY: f64 = 0.35;
+const TOOLING_FILE_PENALTY: f64 = 0.15;
 const DOC_FILE_QUERY_PENALTY: f64 = 0.45;
 const TEST_FILE_QUERY_PENALTY: f64 = 0.45;
 
