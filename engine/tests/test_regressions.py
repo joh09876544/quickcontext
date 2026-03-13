@@ -501,6 +501,48 @@ class RegressionTests(unittest.TestCase):
         self.assertGreater(indexer_bonus, 0.0)
         self.assertEqual(neutral, 0.0)
 
+    def test_graph_path_bonus_prefers_service_graph_files_for_import_queries(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        service_bonus = searcher._graph_path_bonus(
+            str(Path("service/src/import_graph.rs").resolve()),
+            "find_importers",
+            ["importers", "dependencies", "module", "neighbors"],
+        )
+        wrapper_bonus = searcher._graph_path_bonus(
+            str(Path("engine/sdk.py").resolve()),
+            "find_importers",
+            ["importers", "dependencies", "module", "neighbors"],
+        )
+        self.assertGreater(service_bonus, wrapper_bonus)
+
+    def test_graph_wrapper_penalty_downranks_sdk_and_cli_for_graph_queries(self) -> None:
+        searcher = CodeSearcher(
+            client=None,
+            collection_name="x",
+            code_provider=_FakeProvider("code", 2),
+            desc_provider=_FakeProvider("desc", 2),
+        )
+        sdk_penalty = searcher._graph_wrapper_penalty(
+            str(Path("engine/sdk.py").resolve()),
+            ["caller", "trace", "graph", "lookup"],
+        )
+        cli_penalty = searcher._graph_wrapper_penalty(
+            str(Path("engine/src/cli.py").resolve()),
+            ["caller", "trace", "graph", "lookup"],
+        )
+        neutral = searcher._graph_wrapper_penalty(
+            str(Path("service/src/symbol_index.rs").resolve()),
+            ["caller", "trace", "graph", "lookup"],
+        )
+        self.assertLess(sdk_penalty, 1.0)
+        self.assertLess(cli_penalty, 1.0)
+        self.assertEqual(neutral, 1.0)
+
     def test_startup_symbol_bonus_prefers_rust_parser_service_for_startup_query(self) -> None:
         searcher = CodeSearcher(
             client=None,

@@ -763,12 +763,14 @@ class CodeSearcher:
             final_score += self._startup_boundary_bonus(file_path_value, ranking_keywords)
             final_score += self._startup_symbol_bonus(file_path_value, symbol_name_value, ranking_keywords)
             final_score += self._implementation_path_bonus(file_path_value, ranking_keywords)
+            final_score += self._graph_path_bonus(file_path_value, symbol_name_value, ranking_keywords)
             final_score += self._filecache_bonus(file_path_value, symbol_name_value, ranking_keywords)
             final_score += self._role_bonus(point.payload.get("role"), ranking_keywords)
             final_score *= self._subsystem_conflict_penalty(file_path_value, ranking_keywords)
             final_score *= self._ranking_subsystem_penalty(file_path_value, ranking_keywords)
             final_score *= self._ranking_helper_penalty(symbol_name_value, ranking_keywords)
             final_score *= self._startup_import_symbol_penalty(symbol_kind_value, ranking_keywords)
+            final_score *= self._graph_wrapper_penalty(file_path_value, ranking_keywords)
             final_score *= self._constructor_penalty(symbol_name_value, ranking_keywords)
             final_score *= self._wrapper_symbol_penalty(file_path_value, symbol_name_value, ranking_keywords)
             final_score *= self._container_symbol_penalty(symbol_name_value, symbol_kind_value, ranking_keywords)
@@ -1036,12 +1038,14 @@ class CodeSearcher:
             final_score += self._startup_boundary_bonus(file_path_value, ranking_keywords)
             final_score += self._startup_symbol_bonus(file_path_value, symbol_name_value, ranking_keywords)
             final_score += self._implementation_path_bonus(file_path_value, ranking_keywords)
+            final_score += self._graph_path_bonus(file_path_value, symbol_name_value, ranking_keywords)
             final_score += self._filecache_bonus(file_path_value, symbol_name_value, ranking_keywords)
             final_score += self._role_bonus(point.payload.get("role"), ranking_keywords)
             final_score *= self._subsystem_conflict_penalty(file_path_value, ranking_keywords)
             final_score *= self._ranking_subsystem_penalty(file_path_value, ranking_keywords)
             final_score *= self._ranking_helper_penalty(symbol_name_value, ranking_keywords)
             final_score *= self._startup_import_symbol_penalty(symbol_kind_value, ranking_keywords)
+            final_score *= self._graph_wrapper_penalty(file_path_value, ranking_keywords)
             final_score *= self._constructor_penalty(symbol_name_value, ranking_keywords)
             final_score *= self._wrapper_symbol_penalty(file_path_value, symbol_name_value, ranking_keywords)
             final_score *= self._container_symbol_penalty(symbol_name_value, symbol_kind_value, ranking_keywords)
@@ -1671,6 +1675,59 @@ class CodeSearcher:
         if normalized.endswith("/engine/src/indexer.py"):
             return 0.07
         return 0.0
+
+    def _graph_path_bonus(self, file_path: str, symbol_name: str, ranking_keywords: list[str]) -> float:
+        """
+        Prefer graph-implementation files for dependency and caller-tracing questions.
+        """
+        if not ranking_keywords:
+            return 0.0
+
+        keyword_set = set(ranking_keywords)
+        import_query = bool(keyword_set.intersection({"import", "imports", "importer", "importers", "dependency", "dependencies", "neighbor", "neighbors", "module"}))
+        call_query = bool(keyword_set.intersection({"call", "calls", "caller", "callers", "trace", "tracing", "traversal", "lookup", "edge", "edges"}))
+        if not import_query and not call_query:
+            return 0.0
+
+        normalized = file_path.replace("\\", "/").lower()
+        path_tokens = set(self._identifier_tokens(normalized, max_tokens=12))
+        symbol_tokens = set(self._identifier_tokens(symbol_name, max_tokens=8))
+        tokens = path_tokens | symbol_tokens
+
+        bonus = 0.0
+        if "/service/src/" in normalized:
+            bonus += 0.03
+        if import_query:
+            bonus += len(tokens.intersection({"import", "imports", "importer", "importers", "graph", "dependency", "dependencies", "neighbor", "neighbors", "module"})) * 0.025
+            if normalized.endswith("/engine/src/parsing.py"):
+                bonus += 0.03
+        if call_query:
+            bonus += len(tokens.intersection({"call", "calls", "caller", "callers", "lookup", "trace", "tracing", "graph", "edge", "edges", "index", "types"})) * 0.02
+            if normalized.endswith("/engine/src/parsing.py"):
+                bonus += 0.03
+        return bonus
+
+    def _graph_wrapper_penalty(self, file_path: str, ranking_keywords: list[str]) -> float:
+        """
+        Down-rank wrapper and transport layers for graph-intent architecture queries.
+        """
+        if not ranking_keywords:
+            return 1.0
+
+        keyword_set = set(ranking_keywords)
+        import_query = bool(keyword_set.intersection({"import", "imports", "importer", "importers", "dependency", "dependencies", "neighbor", "neighbors", "module"}))
+        call_query = bool(keyword_set.intersection({"call", "calls", "caller", "callers", "trace", "tracing", "traversal", "lookup", "edge", "edges"}))
+        if not import_query and not call_query:
+            return 1.0
+
+        normalized = file_path.replace("\\", "/").lower()
+        if normalized.endswith("/engine/sdk.py"):
+            return 0.7
+        if normalized.endswith("/engine/src/cli.py"):
+            return 0.55 if call_query else 0.75
+        if normalized.endswith("/engine/src/pipe.py"):
+            return 0.7 if import_query else 0.85
+        return 1.0
 
     def _startup_symbol_bonus(self, file_path: str, symbol_name: str, ranking_keywords: list[str]) -> float:
         """
