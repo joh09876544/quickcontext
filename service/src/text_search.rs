@@ -12,6 +12,9 @@ use crate::text_index::{search_candidates, IndexedCandidate};
 use crate::types::{TextSearchMatch, TextSearchResult};
 
 const SNIPPET_CONTEXT_LINES: usize = 3;
+const TOOLING_FILE_PENALTY: f64 = 0.35;
+const DOC_FILE_QUERY_PENALTY: f64 = 0.45;
+const TEST_FILE_QUERY_PENALTY: f64 = 0.45;
 
 
 /// Full-text search over files using persistent BM25 candidates and structural reranking.
@@ -174,6 +177,7 @@ fn score_and_rank(
         let coverage_boost = structural_boost::compute_coverage_boost(&query_terms, &content);
         let role_boost =
             structural_boost::compute_role_boost(structural_boost::classify_role_from_content(&content));
+        let tooling_penalty = compute_tooling_path_penalty(&candidate.file_path, &query_terms);
 
         let intent_boost = if intent_mode {
             compute_intent_score(
@@ -186,7 +190,8 @@ fn score_and_rank(
             1.0
         };
 
-        let boosted_score = candidate.score * category_boost * coverage_boost * role_boost * intent_boost;
+        let boosted_score =
+            candidate.score * category_boost * coverage_boost * role_boost * intent_boost * tooling_penalty;
         let (snippet, line_start, line_end) = extract_snippet(&content, &candidate.matched_terms);
 
         matches.push(TextSearchMatch {
@@ -220,6 +225,7 @@ fn score_and_rank_fast(
         let category_boost =
             structural_boost::compute_category_boost(structural_boost::classify_file(&candidate.file_path));
         let coverage_boost = compute_matched_term_coverage_boost(&candidate.matched_terms, query_terms);
+        let tooling_penalty = compute_tooling_path_penalty(&candidate.file_path, query_terms);
         let intent_boost = if intent_mode {
             compute_intent_score(
                 &candidate.matched_terms,
@@ -231,7 +237,7 @@ fn score_and_rank_fast(
             1.0
         };
 
-        scored.push((idx, candidate.score * category_boost * coverage_boost * intent_boost));
+        scored.push((idx, candidate.score * category_boost * coverage_boost * intent_boost * tooling_penalty));
     }
 
     scored.sort_by(|a, b| {
@@ -456,6 +462,69 @@ fn extract_snippet(content: &str, matched_terms: &[String]) -> (String, usize, u
     (snippet, start + 1, end)
 }
 
+fn compute_tooling_path_penalty(path: &str, query_terms: &[String]) -> f64 {
+    let normalized_path = path.to_ascii_lowercase().replace('\\', "/");
+    let tooling_terms = [
+        "benchmark",
+        "latency",
+        "coverage",
+        "phase",
+        "tooling",
+        "script",
+        "scripts",
+        "instrumentation",
+        "timing",
+    ];
+    let query_is_tooling = query_terms
+        .iter()
+        .any(|term| tooling_terms.iter().any(|tool| term == tool));
+    if query_is_tooling {
+        return 1.0;
+    }
+
+    let is_tooling_path = normalized_path.contains("/scripts/")
+        || normalized_path.starts_with("scripts/")
+        || normalized_path.contains("benchmark")
+        || normalized_path.ends_with("_cases.json")
+        || normalized_path.ends_with(".bench.rs");
+    if is_tooling_path {
+        return TOOLING_FILE_PENALTY;
+    }
+
+    let doc_terms = ["doc", "docs", "documentation", "readme", "guide", "guides", "manual"];
+    let query_is_doc_focused = query_terms
+        .iter()
+        .any(|term| doc_terms.iter().any(|doc| term == doc));
+    let is_doc_path = normalized_path.ends_with(".md")
+        || normalized_path.ends_with(".rst")
+        || normalized_path.contains("/docs/")
+        || normalized_path.contains("/doc/")
+        || normalized_path.ends_with("readme")
+        || normalized_path.ends_with("readme.md")
+        || normalized_path.ends_with("ai_docs.md");
+    if is_doc_path && !query_is_doc_focused {
+        return DOC_FILE_QUERY_PENALTY;
+    }
+
+    let test_terms = ["test", "tests", "spec", "specs", "regression", "unittest", "pytest"];
+    let query_is_test_focused = query_terms
+        .iter()
+        .any(|term| test_terms.iter().any(|test| term == test));
+    let is_test_path = normalized_path.contains("/tests/")
+        || normalized_path.contains("/test/")
+        || normalized_path.contains("/__tests__/")
+        || normalized_path.ends_with(".test.ts")
+        || normalized_path.ends_with(".test.js")
+        || normalized_path.ends_with("_test.py")
+        || normalized_path.ends_with("_spec.py")
+        || normalized_path.contains("test_regressions.py");
+    if is_test_path && !query_is_test_focused {
+        return TEST_FILE_QUERY_PENALTY;
+    }
+
+    1.0
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -487,6 +556,48 @@ mod tests {
         let high_coverage_score = compute_intent_score(&high_coverage_terms, &exact_term_set, &expanded_term_set, 2);
 
         assert!(high_coverage_score > partial_score);
+    }
+
+    #[test]
+    fn test_compute_tooling_path_penalty_penalizes_scripts_for_normal_queries() {
+        let query_terms = vec!["python".to_string(), "connect".to_string(), "linux".to_string()];
+        let penalty = compute_tooling_path_penalty("scripts/retrieval_benchmark.py", &query_terms);
+        assert!(penalty < 1.0);
+    }
+
+    #[test]
+    fn test_compute_tooling_path_penalty_keeps_scripts_for_tooling_queries() {
+        let query_terms = vec!["benchmark".to_string(), "latency".to_string()];
+        let penalty = compute_tooling_path_penalty("scripts/retrieval_benchmark.py", &query_terms);
+        assert_eq!(penalty, 1.0);
+    }
+
+    #[test]
+    fn test_compute_tooling_path_penalty_penalizes_docs_for_non_doc_queries() {
+        let query_terms = vec!["python".to_string(), "connect".to_string(), "linux".to_string()];
+        let penalty = compute_tooling_path_penalty("AI_DOCS.md", &query_terms);
+        assert!(penalty < 1.0);
+    }
+
+    #[test]
+    fn test_compute_tooling_path_penalty_keeps_docs_for_doc_queries() {
+        let query_terms = vec!["docs".to_string(), "readme".to_string()];
+        let penalty = compute_tooling_path_penalty("AI_DOCS.md", &query_terms);
+        assert_eq!(penalty, 1.0);
+    }
+
+    #[test]
+    fn test_compute_tooling_path_penalty_penalizes_tests_for_non_test_queries() {
+        let query_terms = vec!["python".to_string(), "connect".to_string(), "linux".to_string()];
+        let penalty = compute_tooling_path_penalty("engine/tests/test_regressions.py", &query_terms);
+        assert!(penalty < 1.0);
+    }
+
+    #[test]
+    fn test_compute_tooling_path_penalty_keeps_tests_for_test_queries() {
+        let query_terms = vec!["test".to_string(), "regression".to_string()];
+        let penalty = compute_tooling_path_penalty("engine/tests/test_regressions.py", &query_terms);
+        assert_eq!(penalty, 1.0);
     }
 
     #[test]
