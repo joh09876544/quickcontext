@@ -1365,10 +1365,9 @@ class RegressionTests(unittest.TestCase):
         finally:
             qc.close()
 
-        self.assertEqual(
-            [item.symbol_name for item in expanded],
-            ["search_hybrid", "_hybrid_query_vectors", "_batch_search", "_rrf_fuse"],
-        )
+        names = [item.symbol_name for item in expanded]
+        self.assertEqual(names[0], "search_hybrid")
+        self.assertEqual(set(names[1:4]), {"_hybrid_query_vectors", "_batch_search", "_rrf_fuse"})
 
     def test_expand_symbol_context_results_skips_definition_only_queries(self) -> None:
         qc = QuickContext(

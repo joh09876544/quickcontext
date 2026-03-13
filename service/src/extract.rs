@@ -208,7 +208,7 @@ pub fn extract_compact_streaming<W: std::io::Write>(
         };
 
         let meta = std::fs::metadata(path).ok();
-        let mut result = extract_file(&path_str, &source, spec);
+        let mut result = extract_file_compact(&path_str, &source, spec);
         result.file_hash = Some(sha256_hex(source.as_bytes()));
         result.file_size = meta.as_ref().map(|m| m.len());
         result.file_mtime = meta.as_ref().and_then(|m| {
@@ -250,7 +250,7 @@ pub fn build_default_ignore(root: &Path) -> Result<Gitignore, ignore::Error> {
     builder.build()
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())
@@ -381,6 +381,19 @@ pub fn file_signature(path: &Path) -> u64 {
 }
 
 pub fn extract_file(file_path: &str, source: &str, spec: &LanguageSpec) -> ExtractionResult {
+    extract_file_with_mode(file_path, source, spec, true)
+}
+
+pub fn extract_file_compact(file_path: &str, source: &str, spec: &LanguageSpec) -> ExtractionResult {
+    extract_file_with_mode(file_path, source, spec, false)
+}
+
+fn extract_file_with_mode(
+    file_path: &str,
+    source: &str,
+    spec: &LanguageSpec,
+    include_source_details: bool,
+) -> ExtractionResult {
     let mut result = ExtractionResult {
         file_path: file_path.to_string(),
         language: spec.name.to_string(),
@@ -461,11 +474,20 @@ pub fn extract_file(file_path: &str, source: &str, spec: &LanguageSpec) -> Extra
             }
         };
 
-        let full_source = def_node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
-        let signature = extract_signature(&full_source);
-        let docstring = doc_text
-            .map(|s| s.to_string())
-            .or_else(|| extract_docstring(source, &def_node, body_node.as_ref()));
+        let definition_text = def_node.utf8_text(source.as_bytes()).unwrap_or("");
+        let full_source = if include_source_details {
+            definition_text.to_string()
+        } else {
+            String::new()
+        };
+        let signature = extract_signature(definition_text);
+        let docstring = if include_source_details {
+            doc_text
+                .map(|s| s.to_string())
+                .or_else(|| extract_docstring(source, &def_node, body_node.as_ref()))
+        } else {
+            None
+        };
         let parent = sanitize_parent_name(find_parent_name(def_node, source));
         let visibility = extract_visibility(source, &def_node, spec.name);
 
@@ -481,8 +503,16 @@ pub fn extract_file(file_path: &str, source: &str, spec: &LanguageSpec) -> Extra
             source: full_source,
             signature,
             docstring,
-            params: params_text.map(|s| s.to_string()),
-            return_type: return_type_text.map(|s| s.to_string()),
+            params: if include_source_details {
+                params_text.map(|s| s.to_string())
+            } else {
+                None
+            },
+            return_type: if include_source_details {
+                return_type_text.map(|s| s.to_string())
+            } else {
+                None
+            },
             parent,
             visibility,
             role: None,
@@ -680,7 +710,8 @@ fn sanitize_parent_name(parent: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_parent_name;
+    use super::{extract_file_compact, sanitize_parent_name};
+    use crate::lang;
 
     #[test]
     fn sanitize_parent_name_drops_import_like_parents() {
@@ -698,6 +729,27 @@ mod tests {
             sanitize_parent_name(Some(" QuickContext ".to_string())),
             Some("QuickContext".to_string())
         );
+    }
+
+    #[test]
+    fn extract_file_compact_omits_source_heavy_fields() {
+        let spec = lang::python::spec();
+        let source = r#"
+class CodeSearcher:
+    def search_hybrid(self, query):
+        return query
+"#;
+
+        let result = extract_file_compact("fixture.py", source, &spec);
+        assert_eq!(result.symbols.len(), 2);
+
+        for symbol in result.symbols {
+            assert!(symbol.source.is_empty());
+            assert!(symbol.docstring.is_none());
+            assert!(symbol.params.is_none());
+            assert!(symbol.return_type.is_none());
+            assert!(symbol.signature.is_some());
+        }
     }
 }
 

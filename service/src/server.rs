@@ -6,7 +6,10 @@ use tokio::net::UnixListener;
 use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
 use tokio_util::sync::CancellationToken;
 
-use crate::extract::{extract_compact_streaming, extract_path, extract_path_with_options, scan_supported_files, ExtractOptions};
+use crate::extract::{
+    extract_compact_streaming, extract_file_compact, extract_path, extract_path_with_options,
+    scan_supported_files, sha256_hex, ExtractOptions,
+};
 use crate::file_ops;
 use crate::symbol_edit;
 use crate::grep::grep_path;
@@ -859,6 +862,57 @@ fn handle_extract(
 
     if (is_compact || is_stats_only) && path.is_dir() {
         return handle_extract_compact(path, specs, options, is_stats_only);
+    }
+
+    if (is_compact || is_stats_only) && path.is_file() {
+        let path_str = path.to_string_lossy();
+        let spec = match lang::detect_language(&path_str, specs) {
+            Some(spec) => spec,
+            None => return Response::error(format!("unsupported file type: {}", path.display())),
+        };
+        let source = match std::fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(e) => return Response::error(format!("failed to read file: {e}")),
+        };
+        let meta = std::fs::metadata(path).ok();
+        let mut compact_result = crate::types::CompactExtractionResult::from_full(&extract_file_compact(
+            &path_str,
+            &source,
+            spec,
+        ));
+        compact_result.file_hash = Some(sha256_hex(source.as_bytes()));
+        compact_result.file_size = meta.as_ref().map(|m| m.len());
+        compact_result.file_mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
+        if is_stats_only {
+            let stats = crate::types::ExtractStats {
+                total_files: 1,
+                total_symbols: compact_result.symbol_count,
+                languages: std::collections::HashMap::from([(spec.name.to_string(), compact_result.symbol_count)]),
+                duration_ms: 0,
+            };
+            return match serde_json::to_value(&stats) {
+                Ok(val) => Response::ok_data(val),
+                Err(e) => Response::error(format!("serialization failed: {e}")),
+            };
+        }
+
+        return match serde_json::to_value(serde_json::json!({
+            "results": [compact_result],
+            "stats": {
+                "total_files": 1,
+                "total_symbols": compact_result.symbol_count,
+                "languages": std::collections::HashMap::from([(spec.name.to_string(), compact_result.symbol_count)]),
+                "duration_ms": 0,
+            },
+        })) {
+            Ok(val) => Response::ok_data(val),
+            Err(e) => Response::error(format!("serialization failed: {e}")),
+        };
     }
 
     match extract_path_with_options(path, specs, options) {

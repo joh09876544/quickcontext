@@ -111,6 +111,7 @@ class QuickContext:
         self._indexers: dict = {}
         self._searchers: dict = {}
         self._file_caches: dict[str, FileSignatureCache] = {}
+        self._symbol_file_compact_cache: dict[str, tuple[int, int, list]] = {}
         self._symbol_file_extract_cache: dict[str, tuple[int, int, list]] = {}
         self._reranker: "ColBERTReranker | None" = None
 
@@ -1793,7 +1794,7 @@ class QuickContext:
             return []
 
         try:
-            extracted_symbols = self._load_file_symbols(anchor_file)
+            extracted_symbols = self._load_file_compact_symbols(anchor_file)
         except Exception:
             return []
 
@@ -1920,6 +1921,7 @@ class QuickContext:
                 "cfg": ("config", "configuration"),
                 "req": ("request",),
                 "resp": ("response",),
+                "rrf": ("fuse", "fusion", "merge"),
             }
             for alias in aliases.get(lowered_value, ()):
                 tokens.add(alias)
@@ -2060,6 +2062,38 @@ class QuickContext:
             return file_path[4:]
         return file_path
 
+    def _load_file_compact_symbols(self, file_path: str) -> list:
+        """
+        Load compact extracted symbols for one file with stat-based cache invalidation.
+        """
+        normalized_path = self._normalize_symbol_file_path(file_path)
+        path = Path(normalized_path)
+        try:
+            resolved = str(path.resolve())
+            stat = path.stat()
+            cache_key = resolved
+            cached = self._symbol_file_compact_cache.get(cache_key)
+            if cached and cached[0] == int(stat.st_mtime_ns) and cached[1] == int(stat.st_size):
+                return cached[2]
+        except Exception:
+            cache_key = normalized_path
+            cached = self._symbol_file_compact_cache.get(cache_key)
+            if cached:
+                return cached[2]
+            stat = None
+
+        results, _stats = self.parser_service.extract_compact(normalized_path)
+        symbols = results[0].symbols if results else []
+        if stat is not None:
+            self._symbol_file_compact_cache[cache_key] = (
+                int(stat.st_mtime_ns),
+                int(stat.st_size),
+                symbols,
+            )
+        else:
+            self._symbol_file_compact_cache[cache_key] = (0, 0, symbols)
+        return symbols
+
     def _load_file_symbols(self, file_path: str) -> list:
         """
         Load extracted symbols for one file with stat-based cache invalidation.
@@ -2096,20 +2130,10 @@ class QuickContext:
         """
         Read precise source for a symbol lookup hit.
         """
-        name = str(getattr(item, "name", ""))
+        name = str(getattr(item, "name", getattr(item, "symbol_name", "")))
         parent = getattr(item, "parent", None)
         file_path = str(getattr(item, "file_path", ""))
-        qualified_name = f"{parent}.{name}" if parent else name
-
-        try:
-            for symbol in self._load_file_symbols(file_path):
-                if symbol.name != name:
-                    continue
-                if parent is not None and symbol.parent != parent:
-                    continue
-                return symbol.source, symbol.signature or getattr(item, "signature", None), symbol.docstring
-        except Exception:
-            pass
+        signature = getattr(item, "signature", None)
 
         try:
             line_start = max(1, int(getattr(item, "line_start", 0)) + 1)
@@ -2121,11 +2145,24 @@ class QuickContext:
             )
             return (
                 "\n".join(line.text for line in snippet.lines),
-                getattr(item, "signature", None),
+                signature,
                 None,
             )
         except Exception:
-            return "", getattr(item, "signature", None), None
+            pass
+
+        qualified_name = f"{parent}.{name}" if parent else name
+        try:
+            extracted = self.extract_symbol(file=file_path, symbol=qualified_name)
+            for symbol in extracted.symbols:
+                if symbol.name != name:
+                    continue
+                if parent is not None and symbol.parent != parent:
+                    continue
+                return symbol.source, symbol.signature or signature, symbol.docstring
+        except Exception:
+            return "", signature, None
+        return "", signature, None
 
     def _build_symbol_description(
         self,
