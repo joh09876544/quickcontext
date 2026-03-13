@@ -1274,6 +1274,152 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(payload["results"][0].symbol_name, "search_hybrid")
         self.assertEqual(payload["related_callers"][0]["caller_name"], "semantic_search")
 
+    def test_expand_symbol_context_results_adds_referenced_helper_symbols(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            anchor = SearchResult(
+                1.0,
+                str(Path("engine/src/searcher.py").resolve()),
+                "search_hybrid",
+                "function",
+                281,
+                380,
+                "code_vector, desc_vector = self._hybrid_query_vectors(query)\n"
+                "code_results, desc_results = self._batch_search(requests=[])\n"
+                "fused = self._rrf_fuse([code_results, desc_results], [0.5, 0.5])",
+                "Hybrid search using RRF fusion across code and description spaces.",
+                parent="CodeSearcher",
+                language="python",
+            )
+            fallback = SearchResult(
+                0.9,
+                str(Path("engine/src/searcher.py").resolve()),
+                "CodeSearcher",
+                "class",
+                115,
+                1579,
+                "",
+                "Semantic code search using dual embeddings.",
+                parent=None,
+                language="python",
+            )
+            extraction = _Extraction(
+                file_path=str(Path("engine/src/searcher.py").resolve()),
+                language="python",
+                symbols=[
+                    _Symbol(
+                        name="_hybrid_query_vectors",
+                        kind="function",
+                        language="python",
+                        file_path=str(Path("engine/src/searcher.py").resolve()),
+                        line_start=700,
+                        line_end=720,
+                        byte_start=0,
+                        byte_end=10,
+                        source="def _hybrid_query_vectors(self, query): ...",
+                        signature="_hybrid_query_vectors(self, query)",
+                        parent="CodeSearcher",
+                    ),
+                    _Symbol(
+                        name="_batch_search",
+                        kind="function",
+                        language="python",
+                        file_path=str(Path("engine/src/searcher.py").resolve()),
+                        line_start=839,
+                        line_end=922,
+                        byte_start=0,
+                        byte_end=10,
+                        source="def _batch_search(self, requests): ...",
+                        signature="_batch_search(self, requests)",
+                        parent="CodeSearcher",
+                    ),
+                    _Symbol(
+                        name="_rrf_fuse",
+                        kind="function",
+                        language="python",
+                        file_path=str(Path("engine/src/searcher.py").resolve()),
+                        line_start=520,
+                        line_end=571,
+                        byte_start=0,
+                        byte_end=10,
+                        source="def _rrf_fuse(self, results, weights): ...",
+                        signature="_rrf_fuse(self, results, weights)",
+                        parent="CodeSearcher",
+                    ),
+                ],
+            )
+            with mock.patch.object(qc, "extract_symbols", return_value=[extraction]):
+                expanded = qc._expand_symbol_context_results(
+                    "How does CodeSearcher.search_hybrid merge code and description vectors?",
+                    [anchor, fallback],
+                    limit=4,
+                )
+        finally:
+            qc.close()
+
+        self.assertEqual(
+            [item.symbol_name for item in expanded],
+            ["search_hybrid", "_hybrid_query_vectors", "_batch_search", "_rrf_fuse"],
+        )
+
+    def test_expand_symbol_context_results_skips_definition_only_queries(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            anchor = SearchResult(
+                1.0,
+                str(Path("engine/src/searcher.py").resolve()),
+                "search_hybrid",
+                "function",
+                281,
+                380,
+                "return self._batch_search(requests=[])\n",
+                "Hybrid search using RRF fusion across code and description spaces.",
+                parent="CodeSearcher",
+                language="python",
+            )
+            fallback = SearchResult(
+                0.9,
+                str(Path("engine/src/searcher.py").resolve()),
+                "CodeSearcher",
+                "class",
+                115,
+                1579,
+                "",
+                "Semantic code search using dual embeddings.",
+                parent=None,
+                language="python",
+            )
+            with mock.patch.object(
+                qc,
+                "extract_symbols",
+                side_effect=AssertionError("extract_symbols should not run for definition-only query"),
+            ):
+                expanded = qc._expand_symbol_context_results(
+                    "Where is CodeSearcher.search_hybrid defined?",
+                    [anchor, fallback],
+                    limit=3,
+                )
+        finally:
+            qc.close()
+
+        self.assertEqual([item.symbol_name for item in expanded], ["search_hybrid", "CodeSearcher"])
+
     def test_semantic_search_bundle_can_skip_graph_related_expansion(self) -> None:
         qc = QuickContext(
             EngineConfig(

@@ -1,0 +1,18 @@
+[
+  {
+    "query": "How does CodeSearcher.search_hybrid merge code and description vectors?",
+    "expected_helpers": ["_hybrid_query_vectors", "_batch_search", "_rrf_fuse"]
+  },
+  {
+    "query": "How does QuickContext.semantic_search_auto decide between direct retrieval and bundle retrieval?",
+    "expected_helpers": ["_should_use_bundle_for_query", "semantic_search_bundle"]
+  },
+  {
+    "query": "How does QdrantIndexer._chunk_to_point build payload metadata before upsert?",
+    "expected_helpers": ["_build_path_context", "_build_path_prefixes"]
+  },
+  {
+    "query": "How does CodeSearcher.search_structured fuse typed sub-queries?",
+    "expected_helpers": ["_batch_search", "_rrf_fuse"]
+  }
+]

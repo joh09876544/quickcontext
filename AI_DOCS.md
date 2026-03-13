@@ -79,7 +79,7 @@ Important config ideas:
 
 Useful SDK retrieval primitives:
 
-- `QuickContext.retrieve_context_auto(...)`: default AI entrypoint; routes exact symbol questions to symbol lookup and broader questions to semantic or bundle retrieval
+- `QuickContext.retrieve_context_auto(...)`: default AI entrypoint; routes exact symbol questions to symbol lookup, expands behavior-oriented exact-symbol questions with helper symbols from the same implementation file, and sends broader questions to semantic or bundle retrieval
 - `QuickContext.semantic_search(...)`: main semantic retrieval path
 - `QuickContext.semantic_search_auto(...)`: semantic-only auto-routing between fast direct retrieval and the deeper bundle path
 - `QuickContext.structured_search(...)`: typed multi-query retrieval
@@ -141,6 +141,7 @@ Validation commands:
 - `venv/Scripts/python.exe -m unittest engine.tests.test_regressions`
 - `venv/Scripts/python.exe scripts/retrieval_benchmark.py --config quickcontext.json --project quickcontext`
 - `venv/Scripts/python.exe scripts/context_retrieval_benchmark.py --config quickcontext.json --project quickcontext --cases-file scripts/context_retrieval_cases.json --strategy context-auto`
+- `venv/Scripts/python.exe scripts/symbol_context_benchmark.py --config quickcontext.json --project quickcontext --cases-file scripts/symbol_context_cases.json --strategy context-auto`
 
 Benchmarking guidance:
 

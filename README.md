@@ -12,7 +12,7 @@ It currently has two main parts:
 The SDK now includes AI-facing retrieval helpers:
 
 - `QuickContext.retrieve_context_auto(...)`
-  Default AI entrypoint. It routes exact symbol questions to the Rust symbol index first, and falls back to semantic or bundle retrieval for broader natural-language questions.
+  Default AI entrypoint. It routes exact symbol questions to the Rust symbol index first, expands behavior-oriented symbol questions with helper symbols from the same implementation file, and falls back to semantic or bundle retrieval for broader natural-language questions.
 - `QuickContext.semantic_search_auto(...)`
   Lets the SDK choose between fast direct semantic retrieval and the deeper graph-aware bundle path.
 - `QuickContext.semantic_search_bundle(...)`
@@ -196,6 +196,7 @@ python -m py_compile engine/src/pipe.py engine/src/parsing.py engine/src/cli.py 
 venv/Scripts/python.exe -m unittest engine.tests.test_regressions
 venv/Scripts/python.exe scripts/retrieval_benchmark.py --config quickcontext.json --project quickcontext
 venv/Scripts/python.exe scripts/context_retrieval_benchmark.py --config quickcontext.json --project quickcontext --cases-file scripts/context_retrieval_cases.json --strategy context-auto
+venv/Scripts/python.exe scripts/symbol_context_benchmark.py --config quickcontext.json --project quickcontext --cases-file scripts/symbol_context_cases.json --strategy context-auto
 ```
 
 For local performance work, keep benchmark notes in `BENCHMARK_LOCAL.md`. That file is intentionally gitignored.

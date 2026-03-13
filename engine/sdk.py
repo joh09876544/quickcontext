@@ -61,7 +61,7 @@ from engine.src.parsing import (
     TraceNode,
 )
 from engine.src.differ import ChunkDiffer
-from engine.src.keywords import extract_keywords
+from engine.src.keywords import STOP_WORDS, extract_keywords
 from engine.src.packer import (
     PackedOutput,
     PackedResult,
@@ -1419,6 +1419,11 @@ class QuickContext:
                 path_prefix=path_prefix,
             )
             if results:
+                results = self._expand_symbol_context_results(
+                    query=query,
+                    results=results,
+                    limit=limit,
+                )
                 if self._should_use_bundle_for_query(query):
                     return {
                         "query": query,
@@ -1553,6 +1558,74 @@ class QuickContext:
             lines.append("Index appears empty. Run index before relying on semantic search.")
 
         return "\n".join(lines)
+
+    def _should_expand_symbol_context_results(self, query: str) -> bool:
+        """
+        Detect exact-symbol questions that need helper-level implementation context.
+        """
+        keywords = set(extract_keywords(query, max_keywords=20))
+        behavior_terms = {
+            "how",
+            "why",
+            "work",
+            "works",
+            "flow",
+            "logic",
+            "behavior",
+            "merge",
+            "fuse",
+            "route",
+            "routed",
+            "decide",
+            "choose",
+            "select",
+            "build",
+            "create",
+            "construct",
+            "compose",
+            "convert",
+            "update",
+            "delete",
+            "remove",
+            "expand",
+            "hydrate",
+            "rank",
+            "score",
+            "pack",
+            "copy",
+            "connect",
+            "upsert",
+            "filter",
+        }
+        definition_terms = {"where", "defined", "definition", "locate", "find"}
+        return bool(keywords.intersection(behavior_terms)) and not (
+            keywords.intersection(definition_terms) and not keywords.intersection(behavior_terms)
+        )
+
+    def _expand_symbol_context_results(
+        self,
+        query: str,
+        results: list,
+        limit: int,
+    ) -> list:
+        """
+        Expand exact symbol anchors with nearby helper symbols from the same implementation file.
+        """
+        if not results or limit <= 1 or not self._should_expand_symbol_context_results(query):
+            return results[: max(limit, 1)]
+
+        anchor = results[0]
+        helpers = self._collect_symbol_helper_results(
+            query=query,
+            anchor=anchor,
+            helper_limit=max(limit - 1, 0),
+        )
+        return self._merge_symbol_context_results(
+            anchor=anchor,
+            helper_results=helpers,
+            fallback_results=results[1:],
+            limit=limit,
+        )
 
     def _extract_symbol_query_candidate(self, query: str) -> Optional[str]:
         """
@@ -1698,6 +1771,198 @@ class QuickContext:
         if not path_prefix:
             return None
         return path_prefix.replace("\\", "/").strip("/").lower()
+
+    def _collect_symbol_helper_results(
+        self,
+        query: str,
+        anchor: object,
+        helper_limit: int,
+    ) -> list:
+        """
+        Collect same-file helper symbols referenced by the anchor implementation.
+        """
+        if helper_limit <= 0:
+            return []
+
+        anchor_source = str(getattr(anchor, "source", "") or "")
+        anchor_file = str(getattr(anchor, "file_path", "") or "")
+        if not anchor_source or not anchor_file:
+            return []
+
+        try:
+            extracted_files = self.extract_symbols(anchor_file)
+        except Exception:
+            return []
+
+        if not extracted_files:
+            return []
+
+        extracted = extracted_files[0]
+        anchor_name = str(getattr(anchor, "symbol_name", ""))
+        anchor_parent = getattr(anchor, "parent", None)
+        anchor_line_start = int(getattr(anchor, "line_start", 0))
+        query_keywords = set(extract_keywords(query, max_keywords=20))
+        query_keywords.update(self._split_symbol_text_tokens(query))
+        source_lower = anchor_source.lower()
+
+        candidates: list[tuple[tuple[int, int, int, int, str], object]] = []
+        for symbol in extracted.symbols:
+            if symbol.name == anchor_name and symbol.parent == anchor_parent and symbol.line_start == anchor_line_start:
+                continue
+            if str(symbol.kind).lower() not in {"function", "method", "class", "struct", "interface", "trait"}:
+                continue
+
+            mentioned = self._symbol_name_in_source(symbol.name, source_lower)
+            same_parent = bool(anchor_parent and symbol.parent == anchor_parent)
+            query_overlap = self._symbol_query_overlap(symbol, query_keywords)
+            reference_overlap = self._symbol_reference_overlap(anchor_source, symbol.name, query_keywords)
+            mismatch_penalty = self._symbol_helper_mismatch_penalty(symbol, query_keywords)
+            container_match = bool(anchor_parent and symbol.name == anchor_parent)
+            if not mentioned and query_overlap == 0 and reference_overlap == 0 and not container_match:
+                continue
+
+            line_distance = abs(int(symbol.line_start) - anchor_line_start)
+            score = (
+                1 if mentioned else 0,
+                1 if same_parent else 0,
+                query_overlap,
+                reference_overlap,
+                -mismatch_penalty,
+                1 if container_match else 0,
+                -line_distance,
+                symbol.name,
+            )
+            candidates.append((score, symbol))
+
+        candidates.sort(reverse=True)
+        helper_results = [
+            self._search_result_from_extracted_symbol(symbol, score=max(0.2, 0.94 - (idx * 0.04)))
+            for idx, (_, symbol) in enumerate(candidates[:helper_limit], 1)
+        ]
+        return helper_results
+
+    def _symbol_name_in_source(self, symbol_name: str, source_lower: str) -> bool:
+        pattern = rf"(?<![A-Za-z0-9_]){re.escape(symbol_name.lower())}(?![A-Za-z0-9_])"
+        return re.search(pattern, source_lower) is not None
+
+    def _symbol_query_overlap(self, symbol: object, query_keywords: set[str]) -> int:
+        if not query_keywords:
+            return 0
+        candidate_text = " ".join(
+            part
+            for part in (
+                str(getattr(symbol, "name", "")),
+                str(getattr(symbol, "signature", "") or ""),
+                str(getattr(symbol, "docstring", "") or ""),
+            )
+            if part
+        )
+        candidate_keywords = set(extract_keywords(candidate_text, max_keywords=20))
+        candidate_keywords.update(self._split_symbol_text_tokens(candidate_text))
+        return len(query_keywords.intersection(candidate_keywords))
+
+    def _symbol_reference_overlap(self, source: str, symbol_name: str, query_keywords: set[str]) -> int:
+        if not source or not query_keywords:
+            return 0
+        lines = source.splitlines()
+        matched_indexes = [
+            idx
+            for idx, line in enumerate(lines)
+            if self._symbol_name_in_source(symbol_name, line.lower())
+        ]
+        if not matched_indexes:
+            return 0
+        window_indexes: set[int] = set()
+        for idx in matched_indexes:
+            for candidate_idx in range(max(0, idx - 1), min(len(lines), idx + 2)):
+                window_indexes.add(candidate_idx)
+        line_text = " ".join(lines[idx] for idx in sorted(window_indexes))
+        line_keywords = set(extract_keywords(line_text, max_keywords=20))
+        line_keywords.update(self._split_symbol_text_tokens(line_text))
+        return len(query_keywords.intersection(line_keywords))
+
+    def _symbol_helper_mismatch_penalty(self, symbol: object, query_keywords: set[str]) -> int:
+        candidate_text = " ".join(
+            part
+            for part in (
+                str(getattr(symbol, "name", "")),
+                str(getattr(symbol, "signature", "") or ""),
+            )
+            if part
+        )
+        candidate_tokens = self._split_symbol_text_tokens(candidate_text)
+        specialized_groups = {
+            "rerank": ({"rerank", "blend"}, 2),
+            "embedding": ({"embed", "embedding", "cached", "cache"}, 2),
+            "limit": ({"limit", "request", "requests", "threshold", "budget"}, 1),
+            "keyword": ({"keyword", "keywords"}, 1),
+            "legacy": ({"legacy"}, 2),
+        }
+        penalty = 0
+        for terms, weight in specialized_groups.values():
+            if not candidate_tokens.intersection(terms):
+                continue
+            if query_keywords.intersection(terms):
+                continue
+            penalty += weight
+        return penalty
+
+    def _split_symbol_text_tokens(self, text: str) -> set[str]:
+        tokens: set[str] = set()
+
+        def add_token(value: str) -> None:
+            lowered_value = value.lower()
+            if len(lowered_value) < 3 or lowered_value in STOP_WORDS:
+                return
+            tokens.add(lowered_value)
+            aliases = {
+                "desc": ("description",),
+                "cfg": ("config", "configuration"),
+                "req": ("request",),
+                "resp": ("response",),
+            }
+            for alias in aliases.get(lowered_value, ()):
+                tokens.add(alias)
+
+        for raw in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text):
+            add_token(raw)
+
+            underscore_parts = [part for part in re.split(r"_+", raw.strip("_")) if part]
+            for part in underscore_parts:
+                add_token(part)
+
+            camel_text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", raw.replace("_", " "))
+            for part in camel_text.split():
+                add_token(part)
+        return tokens
+
+    def _merge_symbol_context_results(
+        self,
+        anchor: object,
+        helper_results: list,
+        fallback_results: list,
+        limit: int,
+    ) -> list:
+        """
+        Keep the primary anchor first, then helper symbols, then fallback symbol hits.
+        """
+        combined: list = []
+        seen: set[tuple[str, str, str | None, int, int]] = set()
+        for item in [anchor, *helper_results, *fallback_results]:
+            key = (
+                str(getattr(item, "file_path", "")),
+                str(getattr(item, "symbol_name", "")),
+                getattr(item, "parent", None),
+                int(getattr(item, "line_start", 0)),
+                int(getattr(item, "line_end", 0)),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            combined.append(item)
+            if len(combined) >= max(limit, 1):
+                break
+        return combined
 
     def _prioritize_symbol_lookup_results(self, results: list, query: str) -> list:
         """
@@ -1851,6 +2116,30 @@ class QuickContext:
         if parent:
             return f"{kind} {parent}.{name}".strip()
         return f"{kind} {name}".strip()
+
+    def _search_result_from_extracted_symbol(self, symbol: object, score: float) -> object:
+        from engine.src.searcher import SearchResult
+
+        file_path = self._normalize_symbol_file_path(str(getattr(symbol, "file_path", "")))
+        return SearchResult(
+            score=score,
+            file_path=file_path,
+            symbol_name=str(getattr(symbol, "name", "")),
+            symbol_kind=str(getattr(symbol, "kind", "")),
+            line_start=int(getattr(symbol, "line_start", 0)),
+            line_end=int(getattr(symbol, "line_end", 0)),
+            source=str(getattr(symbol, "source", "") or ""),
+            description=self._build_symbol_description(
+                symbol,
+                getattr(symbol, "docstring", None),
+                getattr(symbol, "signature", None),
+            ),
+            signature=getattr(symbol, "signature", None),
+            docstring=getattr(symbol, "docstring", None),
+            parent=getattr(symbol, "parent", None),
+            language=getattr(symbol, "language", None),
+            path_context=self._build_symbol_path_context(file_path),
+        )
 
     def _build_symbol_path_context(self, file_path: str) -> str:
         parts = [segment for segment in Path(file_path).parts if segment not in ("", "/", "\\")]
