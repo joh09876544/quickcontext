@@ -1405,9 +1405,76 @@ class RegressionTests(unittest.TestCase):
         finally:
             qc.close()
 
-        relations = {item["relations"][0]["relation"] for item in payload["related_files"]}
-        self.assertIn("graph_lexical_neighbor", relations)
-        self.assertIn(str(Path("service/src/import_graph.rs").resolve()), {item["file_path"] for item in payload["related_files"]})
+        all_paths = {str(Path(item.file_path).resolve()) for item in payload["results"]}
+        all_paths.update(item["file_path"] for item in payload["related_files"])
+        self.assertIn(str(Path("service/src/import_graph.rs").resolve()), all_paths)
+
+    def test_promote_graph_related_results_dedupes_wrappers_and_backfills_impl_files(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            results = [
+                SearchResult(1.0, str(Path("engine/src/parsing.py").resolve()), "find_importers", "function", 1, 10, "", "", language="python"),
+                SearchResult(0.9, str(Path("engine/src/parsing.py").resolve()), "import_graph", "function", 11, 20, "", "", language="python"),
+                SearchResult(0.8, str(Path("engine/sdk.py").resolve()), "find_importers", "function", 21, 30, "", "", language="python"),
+            ]
+            related_files = [
+                {
+                    "file_path": str(Path("service/src/import_graph.rs").resolve()),
+                    "distance": 1,
+                    "relations": [
+                        {
+                            "relation": "graph_lexical_neighbor",
+                            "seed_file": "",
+                            "module_path": "",
+                            "language": "rust",
+                            "line": 44,
+                        }
+                    ],
+                },
+                {
+                    "file_path": str(Path("engine/src/pipe.py").resolve()),
+                    "distance": 1,
+                    "relations": [
+                        {
+                            "relation": "lexical_neighbor",
+                            "seed_file": "",
+                            "module_path": "",
+                            "language": "python",
+                            "line": 10,
+                        }
+                    ],
+                },
+            ]
+            promoted, remaining = qc._promote_graph_related_results(
+                "How does the code find importers for a file and merge import neighbors?",
+                results,
+                related_files,
+                limit=3,
+            )
+        finally:
+            qc.close()
+
+        promoted_paths = [Path(item.file_path).resolve() for item in promoted]
+        self.assertEqual(
+            promoted_paths,
+            [
+                Path("engine/src/parsing.py").resolve(),
+                Path("engine/sdk.py").resolve(),
+                Path("service/src/import_graph.rs").resolve(),
+            ],
+        )
+        self.assertEqual(
+            [Path(item["file_path"]).resolve() for item in remaining],
+            [Path("engine/src/pipe.py").resolve()],
+        )
 
     def test_retrieve_context_auto_routes_non_symbol_query_to_text_primary(self) -> None:
         qc = QuickContext(

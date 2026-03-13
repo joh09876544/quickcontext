@@ -1534,6 +1534,13 @@ class QuickContext:
                 payload["related_files"] = payload["related_files"][:related_file_limit]
             else:
                 payload["related_files"] = lexical_related
+            if self._should_use_graph_related_for_query(query):
+                payload["results"], payload["related_files"] = self._promote_graph_related_results(
+                    query=query,
+                    results=payload["results"],
+                    related_files=payload["related_files"],
+                    limit=limit,
+                )
         return payload
 
     def structured_search(
@@ -1872,6 +1879,76 @@ class QuickContext:
                 break
         return related
 
+    def _promote_graph_related_results(
+        self,
+        query: str,
+        results: list,
+        related_files: list[dict],
+        limit: int,
+    ) -> tuple[list, list[dict]]:
+        """
+        Dedupe primary files and backfill graph-implementation files from related context.
+        """
+        primary: list = []
+        seen_paths: set[str] = set()
+        for item in results:
+            file_path = str(getattr(item, "file_path", ""))
+            if not file_path or file_path in seen_paths:
+                continue
+            seen_paths.add(file_path)
+            primary.append(item)
+
+        if len(primary) >= max(limit, 1):
+            return primary[: max(limit, 1)], related_files
+
+        scored_related = sorted(
+            related_files,
+            key=lambda item: self._graph_related_file_priority(query, item),
+            reverse=True,
+        )
+
+        promoted_paths: set[str] = set()
+        for item in scored_related:
+            file_path = str(item["file_path"])
+            if file_path in seen_paths:
+                continue
+            primary.append(self._related_file_to_search_result(item))
+            seen_paths.add(file_path)
+            promoted_paths.add(file_path)
+            if len(primary) >= max(limit, 1):
+                break
+
+        remaining_related = [item for item in related_files if item["file_path"] not in promoted_paths]
+        return primary[: max(limit, 1)], remaining_related
+
+    def _graph_related_file_priority(self, query: str, related_file: dict) -> int:
+        file_path = str(related_file["file_path"]).replace("\\", "/").lower()
+        relation = related_file["relations"][0]["relation"]
+        keywords = set(extract_keywords(query, max_keywords=20))
+        path_tokens = self._split_symbol_text_tokens(file_path.replace("/", " "))
+
+        import_query = bool(keywords.intersection({"import", "imports", "importer", "importers", "dependency", "dependencies", "neighbor", "neighbors", "module"}))
+        call_query = bool(keywords.intersection({"call", "calls", "caller", "callers", "trace", "tracing", "traversal", "lookup", "edge", "edges"}))
+
+        score = 0
+        if relation == "graph_lexical_neighbor":
+            score += 2
+        if "/service/src/" in file_path:
+            score += 1
+        if import_query:
+            score += len(path_tokens.intersection({"import", "imports", "importer", "importers", "graph", "dependency", "dependencies", "neighbor", "neighbors", "module"})) * 2
+            if file_path.endswith("/engine/src/parsing.py"):
+                score += 1
+        if call_query:
+            score += len(path_tokens.intersection({"call", "calls", "caller", "callers", "trace", "tracing", "graph", "lookup", "edge", "edges", "index", "type", "types"})) * 2
+            if file_path.endswith("/engine/src/parsing.py"):
+                score += 1
+
+        if file_path.endswith("/engine/sdk.py") or file_path.endswith("/engine/src/cli.py") or file_path.endswith("/engine/src/pipe.py"):
+            score -= 3
+
+        return score
+
     def _graph_companion_query(self, query: str) -> str:
         """
         Build a condensed lexical query for graph- and dependency-oriented questions.
@@ -2025,6 +2102,36 @@ class QuickContext:
                 return True
 
         return False
+
+    def _related_file_to_search_result(self, related_file: dict) -> object:
+        """
+        Convert a related-file payload into a lightweight SearchResult row.
+        """
+        from engine.src.searcher import SearchResult
+
+        file_path = str(related_file["file_path"]).replace("\\\\?\\", "")
+        relation = related_file["relations"][0]
+        line = int(relation.get("line") or 0)
+        source = ""
+        if line > 0:
+            try:
+                snippet = self.file_read(file=file_path, start_line=line, end_line=line + 6)
+                source = "\n".join(item.text for item in snippet.lines)
+            except Exception:
+                source = ""
+
+        return SearchResult(
+            score=0.0,
+            file_path=file_path,
+            symbol_name=Path(file_path).name,
+            symbol_kind="file_match",
+            line_start=line,
+            line_end=max(line, line + 6),
+            source=source,
+            description=relation.get("relation", "related_file"),
+            language=relation.get("language"),
+            path_context=self._build_symbol_path_context(file_path),
+        )
 
     def _expand_symbol_context_results(
         self,
