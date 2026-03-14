@@ -16,7 +16,7 @@ from engine.src.dedup import deduplicate_chunks
 from engine.src.describer import build_fallback_description
 from engine.src.filecache import FileSignatureCache
 from engine.src.cli import _optimize_search_config
-from engine.src.parsing import CompactExtractionResult, ExtractStats, ImportEdge, RustParserService
+from engine.src.parsing import CompactExtractionResult, ExtractStats, ImportEdge, RustParserService, SymbolLookupItem, SymbolLookupResult
 from engine.src.qdrant import QdrantConnection
 from engine.src.searcher import CodeSearcher, LIGHT_RESULT_PAYLOAD_FIELDS, SearchResult
 
@@ -2277,7 +2277,7 @@ class RegressionTests(unittest.TestCase):
             ),
         ]
 
-        with mock.patch.object(qc, "_load_file_symbols", return_value=helpers):
+        with mock.patch.object(qc, "_load_file_symbol_candidates", return_value=helpers):
             results = qc._collect_symbol_helper_results(
                 query="How does CodeSearcher.search_hybrid merge code and description vectors?",
                 anchor=anchor,
@@ -2343,7 +2343,7 @@ class RegressionTests(unittest.TestCase):
             ),
         ]
 
-        with mock.patch.object(qc, "_load_file_symbols", return_value=helpers):
+        with mock.patch.object(qc, "_load_file_symbol_candidates", return_value=helpers):
             results = qc._collect_symbol_helper_results(
                 query="How does CodeSearcher.search_hybrid merge code and description vectors?",
                 anchor=anchor,
@@ -2352,6 +2352,102 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0].symbol_name, "_batch_search")
+
+    def test_collect_symbol_helper_results_can_use_index_file_symbols(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        anchor = SearchResult(
+            score=1.0,
+            file_path=str(Path("engine/src/searcher.py").resolve()),
+            symbol_name="search_hybrid",
+            symbol_kind="method",
+            line_start=10,
+            line_end=20,
+            source="return _batch_search(code_requests) + _rrf_fuse(result_lists)",
+            description="hybrid search",
+            parent="CodeSearcher",
+            language="python",
+        )
+        qc._parser_service = mock.Mock()
+        qc._parser_service.file_symbols.return_value = SymbolLookupResult(
+            project_root=str(Path(".").resolve()),
+            results=[
+                SymbolLookupItem(
+                    name="_batch_search",
+                    kind="method",
+                    language="python",
+                    file_path=anchor.file_path,
+                    line_start=30,
+                    line_end=40,
+                    parent="CodeSearcher",
+                    signature="_batch_search(self, requests)",
+                ),
+                SymbolLookupItem(
+                    name="_rrf_fuse",
+                    kind="method",
+                    language="python",
+                    file_path=anchor.file_path,
+                    line_start=50,
+                    line_end=60,
+                    parent="CodeSearcher",
+                    signature="_rrf_fuse(self, lists)",
+                ),
+            ],
+            indexed_files=1,
+            indexed_symbols=2,
+            from_cache=True,
+        )
+
+        with mock.patch.object(qc, "_load_file_symbols", side_effect=AssertionError("fallback extraction should not run")), \
+             mock.patch.object(qc, "_read_symbol_context", side_effect=lambda item: (f"source for {getattr(item, 'name', getattr(item, 'symbol_name', ''))}", item.signature, None)):
+            results = qc._collect_symbol_helper_results(
+                query="How does CodeSearcher.search_hybrid merge code and description vectors?",
+                anchor=anchor,
+                helper_limit=2,
+            )
+
+        self.assertEqual({item.symbol_name for item in results}, {"_batch_search", "_rrf_fuse"})
+        self.assertEqual({item.source for item in results}, {"source for _batch_search", "source for _rrf_fuse"})
+        qc._parser_service.file_symbols.assert_called_once()
+
+    def test_load_file_symbol_candidates_falls_back_to_extract(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        qc._parser_service = mock.Mock()
+        qc._parser_service.file_symbols.side_effect = RuntimeError("index unavailable")
+        helpers = [_Symbol(
+            name="_batch_search",
+            kind="method",
+            language="python",
+            file_path=str(Path("engine/src/searcher.py").resolve()),
+            line_start=30,
+            line_end=40,
+            byte_start=0,
+            byte_end=10,
+            source="def _batch_search(self, requests):\n    return []",
+            signature="_batch_search(self, requests)",
+            parent="CodeSearcher",
+        )]
+
+        with mock.patch.object(qc, "_load_file_symbols", return_value=helpers) as fallback:
+            loaded = qc._load_file_symbol_candidates(str(Path("engine/src/searcher.py").resolve()))
+
+        self.assertEqual(loaded, helpers)
+        fallback.assert_called_once()
 
 
 class LazyImportBoundaryTests(unittest.TestCase):

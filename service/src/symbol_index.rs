@@ -229,6 +229,61 @@ pub fn symbol_lookup(
     })
 }
 
+pub fn file_symbols(
+    file: &Path,
+    path: &Path,
+    specs: &[LanguageSpec],
+    respect_gitignore: bool,
+    limit: usize,
+) -> Result<SymbolLookupResult, String> {
+    let effective_limit = limit.max(1);
+    let project_root = normalize_path(path)?;
+    let normalized_file = normalize_path(file)?;
+
+    let project_lock = {
+        let mut manager = manager().lock().map_err(|_| "symbol index lock poisoned".to_string())?;
+        manager.get_or_build(&project_root, specs, respect_gitignore)?
+    };
+
+    let from_cache = refresh_symbol_index_if_needed(&project_lock, &project_root, specs, respect_gitignore)?;
+
+    let project_index = project_lock
+        .read()
+        .map_err(|_| "symbol index read lock poisoned".to_string())?;
+
+    let mut file_results: Vec<SymbolLookupItem> = project_index
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.file_path == normalized_file)
+        .map(|symbol| SymbolLookupItem {
+            name: symbol.name.clone(),
+            kind: symbol.kind.clone(),
+            language: symbol.language.clone(),
+            file_path: symbol.file_path.clone(),
+            line_start: symbol.line_start,
+            line_end: symbol.line_end,
+            parent: symbol.parent.clone(),
+            signature: symbol.signature.clone(),
+        })
+        .collect();
+
+    file_results.sort_by(|a, b| {
+        a.line_start
+            .cmp(&b.line_start)
+            .then(a.line_end.cmp(&b.line_end))
+            .then(a.name.cmp(&b.name))
+    });
+    file_results.truncate(effective_limit);
+
+    Ok(SymbolLookupResult {
+        project_root,
+        results: file_results,
+        indexed_files: project_index.file_signatures.len(),
+        indexed_symbols: project_index.symbols.len(),
+        from_cache,
+    })
+}
+
 pub fn warm_project(
     path: &Path,
     specs: &[LanguageSpec],

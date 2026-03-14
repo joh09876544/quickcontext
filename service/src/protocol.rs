@@ -55,6 +55,16 @@ pub enum Request {
         #[serde(default)]
         intent_level: Option<u8>,
     },
+    #[serde(rename = "file_symbols")]
+    FileSymbols {
+        file: String,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        respect_gitignore: Option<bool>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     #[serde(rename = "find_callers")]
     FindCallers {
         symbol: String,

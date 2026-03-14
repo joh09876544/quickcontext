@@ -1996,6 +1996,42 @@ class RustParserService:
         )
         return SymbolLookupResult.from_dict(raw)
 
+    def file_symbols(
+        self,
+        file: str | Path,
+        path: str | Path | None = None,
+        respect_gitignore: bool = True,
+        limit: int = 256,
+        ensure_server: bool = True,
+        timeout_ms: int = 10000,
+    ) -> SymbolLookupResult:
+        """
+        List indexed symbols for one file via the Rust symbol index.
+
+        file: str | Path — Absolute path to the source file.
+        path: str | Path | None — Project root or search scope. Uses cwd when None.
+        respect_gitignore: bool — Apply ignore rules when True.
+        limit: int — Maximum symbols returned.
+        ensure_server: bool — Auto-start service if unavailable.
+        timeout_ms: int — Startup/connect timeout in milliseconds.
+        Returns: SymbolLookupResult — Typed file-symbol payload.
+        """
+        input_file = str(Path(file).resolve())
+        input_path = str(Path(path).resolve()) if path is not None else str(Path.cwd().resolve())
+
+        if ensure_server:
+            self._client.ensure_server(timeout_ms=timeout_ms)
+        elif not self.connected:
+            self.connect(timeout_ms=timeout_ms)
+
+        raw = self._client.file_symbols(
+            file=input_file,
+            path=input_path,
+            respect_gitignore=respect_gitignore,
+            limit=limit,
+        )
+        return SymbolLookupResult.from_dict(raw)
+
     def find_callers(
         self,
         symbol: str,

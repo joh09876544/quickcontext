@@ -477,6 +477,39 @@ class PipeClient:
             raise PipeProtocolError("invalid symbol lookup response payload")
         return data
 
+    def file_symbols(
+        self,
+        file: str,
+        path: Optional[str] = None,
+        respect_gitignore: bool = True,
+        limit: int = 256,
+    ) -> dict:
+        """Lists indexed symbols for a specific file from the Rust symbol index.
+
+        * file -- str, absolute file path
+        * path -- Optional[str], project root or search scope path
+        * respect_gitignore -- bool, apply gitignore rules when True
+        * limit -- int, max symbols to return
+
+        Returns dict with file symbol rows and index metadata.
+        """
+        payload: dict[str, object] = {
+            "method": "file_symbols",
+            "file": file,
+            "respect_gitignore": respect_gitignore,
+            "limit": limit,
+        }
+        if path is not None:
+            payload["path"] = path
+
+        resp = self.request(payload)
+        if resp.get("status") == "error":
+            raise PipeError(resp.get("message", "file symbols failed"))
+        data = resp.get("data", {})
+        if not isinstance(data, dict):
+            raise PipeProtocolError("invalid file symbols response payload")
+        return data
+
     def find_callers(self, symbol: str, path: Optional[str] = None, respect_gitignore: bool = True, limit: int = 100) -> dict:
         """Finds caller sites for a symbol using Rust call index.
 

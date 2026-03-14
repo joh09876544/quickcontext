@@ -21,7 +21,7 @@ use crate::pattern_rewrite;
 use crate::protocol::{Request, Response};
 use crate::protocol_search::{self, ProtocolSearchOptions};
 use crate::skeleton::{self, SkeletonOptions};
-use crate::symbol_index::{find_callers, symbol_lookup, trace_call_graph, warm_project as warm_symbol_project};
+use crate::symbol_index::{file_symbols, find_callers, symbol_lookup, trace_call_graph, warm_project as warm_symbol_project};
 use crate::types::TraceDirection;
 use crate::text_search;
 
@@ -308,6 +308,18 @@ async fn dispatch(req: Request, specs: &[LanguageSpec], cancel: &CancellationTok
             limit.unwrap_or(DEFAULT_SYMBOL_LIMIT),
             intent_mode.unwrap_or(DEFAULT_INTENT_MODE),
             intent_level.unwrap_or(DEFAULT_INTENT_LEVEL),
+            specs,
+        ),
+        Request::FileSymbols {
+            file,
+            path,
+            respect_gitignore,
+            limit,
+        } => handle_file_symbols(
+            &file,
+            path.as_deref(),
+            respect_gitignore.unwrap_or(true),
+            limit.unwrap_or(DEFAULT_SYMBOL_LIMIT),
             specs,
         ),
         Request::FindCallers {
@@ -1116,6 +1128,33 @@ fn handle_symbol_lookup(
         limit,
         intent_mode,
         intent_level,
+    ) {
+        Ok(results) => match serde_json::to_value(&results) {
+            Ok(val) => Response::ok_data(val),
+            Err(e) => Response::error(format!("serialization failed: {e}")),
+        },
+        Err(e) => Response::error(e),
+    }
+}
+
+
+fn handle_file_symbols(
+    file: &str,
+    path_str: Option<&str>,
+    respect_gitignore: bool,
+    limit: usize,
+    specs: &[LanguageSpec],
+) -> Response {
+    let target = path_str.unwrap_or(".");
+    let path = Path::new(target);
+    let file_path = Path::new(file);
+
+    match file_symbols(
+        file_path,
+        path,
+        specs,
+        respect_gitignore,
+        limit,
     ) {
         Ok(results) => match serde_json::to_value(&results) {
             Ok(val) => Response::ok_data(val),

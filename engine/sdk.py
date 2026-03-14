@@ -2476,7 +2476,7 @@ class QuickContext:
             return []
 
         try:
-            extracted_symbols = self._load_file_symbols(anchor_file)
+            extracted_symbols = self._load_file_symbol_candidates(anchor_file)
         except Exception:
             return []
 
@@ -2531,7 +2531,25 @@ class QuickContext:
             self._search_result_from_extracted_symbol(symbol, score=max(0.2, 0.94 - (idx * 0.04)))
             for idx, (_, symbol) in enumerate(candidates[:helper_limit], 1)
         ]
-        return helper_results
+        return self._hydrate_search_result_sources(helper_results)
+
+    def _load_file_symbol_candidates(self, file_path: str) -> list:
+        """
+        Load same-file symbol metadata from the Rust symbol index, falling back to extraction.
+        """
+        normalized_path = self._normalize_symbol_file_path(file_path)
+        try:
+            lookup = self.parser_service.file_symbols(
+                file=normalized_path,
+                path=Path.cwd(),
+                limit=2048,
+            )
+            if lookup.results:
+                return lookup.results
+        except Exception:
+            pass
+
+        return self._load_file_symbols(normalized_path)
 
     def _build_symbol_source_context(self, source: str) -> dict[str, object]:
         lines = source.splitlines()
