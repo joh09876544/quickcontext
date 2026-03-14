@@ -13,6 +13,9 @@ WINDOWS_PIPE_NAME = r"\\.\pipe\quickcontext"
 SOCKET_PATH_ENV_VAR = "QC_SOCKET_PATH"
 MAX_FRAME_SIZE = 256 * 1024 * 1024
 _LAUNCHED_SERVER_PROCESSES: list[subprocess.Popen] = []
+CONNECT_RETRY_SLEEP_SECONDS = 0.01
+ENSURE_SERVER_PRECHECK_TIMEOUT_MS = 25
+WAIT_NAMED_PIPE_POLL_MS = 25
 
 if IS_WINDOWS:
     import ctypes
@@ -169,7 +172,8 @@ class PipeClient:
             if err == ERROR_PIPE_BUSY:
                 if time.monotonic() >= deadline:
                     raise PipeConnectionError("pipe busy, timed out waiting")
-                kernel32.WaitNamedPipeW(self._pipe_name, min(1000, timeout_ms))
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                kernel32.WaitNamedPipeW(self._pipe_name, min(WAIT_NAMED_PIPE_POLL_MS, remaining_ms))
                 continue
 
             if time.monotonic() >= deadline:
@@ -177,7 +181,7 @@ class PipeClient:
                     f"failed to connect to {self._pipe_name} (win32 error {err})"
                 )
 
-            time.sleep(0.05)
+            time.sleep(CONNECT_RETRY_SLEEP_SECONDS)
 
     def _connect_unix(self, timeout_ms: int) -> None:
         deadline = time.monotonic() + (timeout_ms / 1000.0)
@@ -194,7 +198,7 @@ class PipeClient:
                     raise PipeConnectionError(
                         f"failed to connect to {self._pipe_name}: {exc}"
                     ) from exc
-                time.sleep(0.05)
+                time.sleep(CONNECT_RETRY_SLEEP_SECONDS)
 
     def close(self) -> None:
         """Close the transport handle."""
@@ -1274,7 +1278,7 @@ class PipeClient:
         launches it as a background process and waits for connection.
         """
         try:
-            self.connect(timeout_ms=100)
+            self.connect(timeout_ms=ENSURE_SERVER_PRECHECK_TIMEOUT_MS)
             return
         except PipeConnectionError:
             pass

@@ -2144,8 +2144,8 @@ class RegressionTests(unittest.TestCase):
         )
         try:
             with mock.patch.object(qc, "_background_warm_once", return_value=None) as warm:
-                qc.start_background_warm(".", idle_delay_seconds=0.01)
                 with qc._activity_scope():
+                    qc.start_background_warm(".", idle_delay_seconds=0.01)
                     time.sleep(0.03)
                     self.assertFalse(warm.called)
                 time.sleep(0.05)
