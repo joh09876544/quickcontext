@@ -76,6 +76,10 @@ from engine.src.packer import (
 from engine.src.project import detect_project_name
 from engine.src.search_modes import BIAS_NAMES, SearchBias, apply_bias, get_bias
 
+_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_UNDERSCORE_SPLIT_PATTERN = re.compile(r"_+")
+_CAMEL_BOUNDARY_PATTERN = re.compile(r"([a-z0-9])([A-Z])")
+
 
 class QuickContext:
     """
@@ -2481,7 +2485,7 @@ class QuickContext:
         anchor_line_start = int(getattr(anchor, "line_start", 0))
         query_keywords = set(extract_keywords(query, max_keywords=20))
         query_keywords.update(self._split_symbol_text_tokens(query))
-        source_lower = anchor_source.lower()
+        source_context = self._build_symbol_source_context(anchor_source)
 
         candidates: list[tuple[tuple[int, int, int, int, str], object]] = []
         for symbol in extracted_symbols:
@@ -2490,11 +2494,12 @@ class QuickContext:
             if str(symbol.kind).lower() not in {"function", "method", "class", "struct", "interface", "trait"}:
                 continue
 
-            mentioned = self._symbol_name_in_source(symbol.name, source_lower)
+            query_overlap_tokens, mismatch_tokens = self._symbol_candidate_token_sets(symbol)
+            mentioned = self._symbol_name_in_source(symbol.name, source_context)
             same_parent = bool(anchor_parent and symbol.parent == anchor_parent)
-            query_overlap = self._symbol_query_overlap(symbol, query_keywords)
-            reference_overlap = self._symbol_reference_overlap(anchor_source, symbol.name, query_keywords)
-            mismatch_penalty = self._symbol_helper_mismatch_penalty(symbol, query_keywords)
+            query_overlap = self._symbol_query_overlap(query_overlap_tokens, query_keywords)
+            reference_overlap = self._symbol_reference_overlap(symbol.name, source_context, query_keywords)
+            mismatch_penalty = self._symbol_helper_mismatch_penalty(mismatch_tokens, query_keywords)
             container_match = bool(anchor_parent and symbol.name == anchor_parent)
             if not mentioned and query_overlap == 0 and reference_overlap == 0 and not container_match:
                 continue
@@ -2519,13 +2524,41 @@ class QuickContext:
         ]
         return helper_results
 
-    def _symbol_name_in_source(self, symbol_name: str, source_lower: str) -> bool:
-        pattern = rf"(?<![A-Za-z0-9_]){re.escape(symbol_name.lower())}(?![A-Za-z0-9_])"
-        return re.search(pattern, source_lower) is not None
+    def _build_symbol_source_context(self, source: str) -> dict[str, object]:
+        lines = source.splitlines()
+        line_keywords: list[set[str]] = []
+        identifier_lines: dict[str, set[int]] = {}
 
-    def _symbol_query_overlap(self, symbol: object, query_keywords: set[str]) -> int:
-        if not query_keywords:
-            return 0
+        for idx, line in enumerate(lines):
+            keywords = set(extract_keywords(line, max_keywords=20))
+            keywords.update(self._split_symbol_text_tokens(line))
+            line_keywords.append(keywords)
+
+            identifiers_on_line = {
+                raw.lower()
+                for raw in _IDENTIFIER_PATTERN.findall(line)
+            }
+            for identifier in identifiers_on_line:
+                identifier_lines.setdefault(identifier, set()).add(idx)
+
+        reference_keywords: dict[str, set[str]] = {}
+        for identifier, matched_indexes in identifier_lines.items():
+            window_keywords: set[str] = set()
+            for idx in matched_indexes:
+                for candidate_idx in range(max(0, idx - 1), min(len(lines), idx + 2)):
+                    window_keywords.update(line_keywords[candidate_idx])
+            reference_keywords[identifier] = window_keywords
+
+        return {
+            "identifiers": set(identifier_lines),
+            "reference_keywords": reference_keywords,
+        }
+
+    def _symbol_name_in_source(self, symbol_name: str, source_context: dict[str, object]) -> bool:
+        identifiers = source_context.get("identifiers", set())
+        return symbol_name.lower() in identifiers
+
+    def _symbol_candidate_token_sets(self, symbol: object) -> tuple[set[str], set[str]]:
         candidate_text = " ".join(
             part
             for part in (
@@ -2537,30 +2570,7 @@ class QuickContext:
         )
         candidate_keywords = set(extract_keywords(candidate_text, max_keywords=20))
         candidate_keywords.update(self._split_symbol_text_tokens(candidate_text))
-        return len(query_keywords.intersection(candidate_keywords))
-
-    def _symbol_reference_overlap(self, source: str, symbol_name: str, query_keywords: set[str]) -> int:
-        if not source or not query_keywords:
-            return 0
-        lines = source.splitlines()
-        matched_indexes = [
-            idx
-            for idx, line in enumerate(lines)
-            if self._symbol_name_in_source(symbol_name, line.lower())
-        ]
-        if not matched_indexes:
-            return 0
-        window_indexes: set[int] = set()
-        for idx in matched_indexes:
-            for candidate_idx in range(max(0, idx - 1), min(len(lines), idx + 2)):
-                window_indexes.add(candidate_idx)
-        line_text = " ".join(lines[idx] for idx in sorted(window_indexes))
-        line_keywords = set(extract_keywords(line_text, max_keywords=20))
-        line_keywords.update(self._split_symbol_text_tokens(line_text))
-        return len(query_keywords.intersection(line_keywords))
-
-    def _symbol_helper_mismatch_penalty(self, symbol: object, query_keywords: set[str]) -> int:
-        candidate_text = " ".join(
+        mismatch_text = " ".join(
             part
             for part in (
                 str(getattr(symbol, "name", "")),
@@ -2568,7 +2578,31 @@ class QuickContext:
             )
             if part
         )
-        candidate_tokens = self._split_symbol_text_tokens(candidate_text)
+        mismatch_tokens = self._split_symbol_text_tokens(mismatch_text)
+        return candidate_keywords, mismatch_tokens
+
+    def _symbol_query_overlap(self, candidate_keywords: set[str], query_keywords: set[str]) -> int:
+        if not candidate_keywords or not query_keywords:
+            return 0
+        return len(query_keywords.intersection(candidate_keywords))
+
+    def _symbol_reference_overlap(
+        self,
+        symbol_name: str,
+        source_context: dict[str, object],
+        query_keywords: set[str],
+    ) -> int:
+        if not query_keywords:
+            return 0
+        reference_keywords = source_context.get("reference_keywords", {})
+        if not isinstance(reference_keywords, dict):
+            return 0
+        candidate_keywords = reference_keywords.get(symbol_name.lower(), set())
+        if not candidate_keywords:
+            return 0
+        return len(query_keywords.intersection(candidate_keywords))
+
+    def _symbol_helper_mismatch_penalty(self, candidate_tokens: set[str], query_keywords: set[str]) -> int:
         specialized_groups = {
             "rerank": ({"rerank", "blend"}, 2),
             "embedding": ({"embed", "embedding", "cached", "cache"}, 2),
@@ -2604,14 +2638,14 @@ class QuickContext:
             for alias in aliases.get(lowered_value, ()):
                 tokens.add(alias)
 
-        for raw in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text):
+        for raw in _IDENTIFIER_PATTERN.findall(text):
             add_token(raw)
 
-            underscore_parts = [part for part in re.split(r"_+", raw.strip("_")) if part]
+            underscore_parts = [part for part in _UNDERSCORE_SPLIT_PATTERN.split(raw.strip("_")) if part]
             for part in underscore_parts:
                 add_token(part)
 
-            camel_text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", raw.replace("_", " "))
+            camel_text = _CAMEL_BOUNDARY_PATTERN.sub(r"\1 \2", raw.replace("_", " "))
             for part in camel_text.split():
                 add_token(part)
         return tokens
