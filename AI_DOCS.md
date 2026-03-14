@@ -93,6 +93,7 @@ Recommendation:
 - Use `semantic_search(...)` for fast single-hop semantic retrieval.
 - Use `semantic_search_auto(...)` when you specifically want semantic-only auto-routing.
 - Use `semantic_search_bundle(...)` directly when you already know the question is broad, architectural, or likely to require cross-file follow-up context.
+- Use `warm_project(...)` once near startup when you expect a long-lived service session and want the first heavy query to be cheaper.
 
 ## Important Rust Modules
 

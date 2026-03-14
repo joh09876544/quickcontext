@@ -40,6 +40,43 @@ This repository includes [AI_DOCS.md](AI_DOCS.md) as the clean agent-facing proj
 
 If your coding assistant expects `AGENTS.md` or `CLAUDE.md`, copy `AI_DOCS.md` to the filename your tool expects in your local setup.
 
+## Python SDK Examples
+
+```python
+from engine.sdk import QuickContext
+from engine.src.config import EngineConfig
+
+config = EngineConfig.from_json("quickcontext.json")
+
+with QuickContext(config) as qc:
+    qc.warm_project(".")
+
+    payload = qc.retrieve_context_auto(
+        "How does the Python layer decide how to connect to the Rust service on Windows versus Linux?",
+        project_name="quickcontext",
+        limit=3,
+    )
+
+    for item in payload["results"]:
+        print(item.file_path, item.symbol_name, item.line_start, item.line_end)
+```
+
+```python
+from engine.sdk import QuickContext
+from engine.src.config import EngineConfig
+
+config = EngineConfig.from_json("quickcontext.json")
+
+with QuickContext(config) as qc:
+    stats = qc.index_directory(
+        ".",
+        project_name="quickcontext",
+        fast=True,
+        show_progress=False,
+    )
+    print(stats.total_chunks, stats.upserted_points)
+```
+
 ## Repository Layout
 
 - `engine/`: Python package and CLI entrypoint
