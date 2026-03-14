@@ -2273,6 +2273,71 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("def search_code", results[0].source)
         self.assertIn("def search_description", results[1].source)
 
+    def test_collect_symbol_helper_results_uses_reference_window_keywords(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        anchor = SearchResult(
+            score=1.0,
+            file_path=str(Path("engine/src/searcher.py").resolve()),
+            symbol_name="search_hybrid",
+            symbol_kind="method",
+            line_start=10,
+            line_end=20,
+            source=(
+                "code_vectors = _batch_search(code_requests)\n"
+                "description_vectors = _batch_search(desc_requests)\n"
+                "return _blend_with_rerank(fused_vectors)\n"
+            ),
+            description="hybrid search",
+            parent="CodeSearcher",
+            language="python",
+        )
+        helpers = [
+            _Symbol(
+                name="_batch_search",
+                kind="method",
+                language="python",
+                file_path=anchor.file_path,
+                line_start=80,
+                line_end=90,
+                byte_start=0,
+                byte_end=10,
+                source="def _batch_search(self, requests):\n    return []",
+                signature="_batch_search(self, requests)",
+                parent="CodeSearcher",
+            ),
+            _Symbol(
+                name="_blend_with_rerank",
+                kind="method",
+                language="python",
+                file_path=anchor.file_path,
+                line_start=40,
+                line_end=50,
+                byte_start=0,
+                byte_end=10,
+                source="def _blend_with_rerank(self, fused_vectors):\n    return fused_vectors",
+                signature="_blend_with_rerank(self, fused_vectors)",
+                parent="CodeSearcher",
+            ),
+        ]
+
+        with mock.patch.object(qc, "_load_file_symbols", return_value=helpers):
+            results = qc._collect_symbol_helper_results(
+                query="How does CodeSearcher.search_hybrid merge code and description vectors?",
+                anchor=anchor,
+                helper_limit=2,
+            )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].symbol_name, "_batch_search")
+
 
 class LazyImportBoundaryTests(unittest.TestCase):
     def _reload_module(self, module_name: str):

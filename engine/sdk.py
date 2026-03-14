@@ -2486,6 +2486,7 @@ class QuickContext:
         query_keywords = set(extract_keywords(query, max_keywords=20))
         query_keywords.update(self._split_symbol_text_tokens(query))
         source_context = self._build_symbol_source_context(anchor_source)
+        reference_keywords = source_context.get("reference_keywords", {})
 
         candidates: list[tuple[tuple[int, int, int, int, str], object]] = []
         for symbol in extracted_symbols:
@@ -2497,9 +2498,17 @@ class QuickContext:
             query_overlap_tokens, mismatch_tokens = self._symbol_candidate_token_sets(symbol)
             mentioned = self._symbol_name_in_source(symbol.name, source_context)
             same_parent = bool(anchor_parent and symbol.parent == anchor_parent)
+            mismatch_penalty = self._symbol_helper_mismatch_penalty(mismatch_tokens, query_keywords)
+            base_overlap = self._symbol_query_overlap(query_overlap_tokens, query_keywords)
+            if (
+                isinstance(reference_keywords, dict)
+                and base_overlap < 2
+                and mismatch_penalty <= 1
+            ):
+                query_overlap_tokens = set(query_overlap_tokens)
+                query_overlap_tokens.update(reference_keywords.get(str(symbol.name).lower(), set()))
             query_overlap = self._symbol_query_overlap(query_overlap_tokens, query_keywords)
             reference_overlap = self._symbol_reference_overlap(symbol.name, source_context, query_keywords)
-            mismatch_penalty = self._symbol_helper_mismatch_penalty(mismatch_tokens, query_keywords)
             container_match = bool(anchor_parent and symbol.name == anchor_parent)
             if not mentioned and query_overlap == 0 and reference_overlap == 0 and not container_match:
                 continue
