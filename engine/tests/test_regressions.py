@@ -4,7 +4,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import builtins
 
@@ -1929,6 +1929,41 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(len(payload["related_files"]), 1)
         self.assertIn(payload["related_files"][0]["file_path"], {"scripts/search_phase_benchmark.py", "scripts/retrieval_benchmark.py"})
+
+    def test_semantic_search_bundle_hydrates_final_anchors_only(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            results = [
+                SearchResult(0.9, "engine/src/parsing.py", "import_graph", "function", 1, 10, "", ""),
+                SearchResult(0.8, "engine/sdk.py", "import_graph", "function", 20, 30, "", ""),
+            ]
+            hydrated = [replace(results[0], source="def import_graph(...): ...")]
+            with mock.patch.object(qc, "semantic_search", return_value=results) as semantic_search, mock.patch.object(
+                qc,
+                "_hydrate_search_result_sources",
+                return_value=hydrated,
+            ) as hydrate:
+                payload = qc.semantic_search_bundle(
+                    "Which files import this module and what dependencies does it have?",
+                    project_name="quickcontext",
+                    limit=1,
+                    related_file_limit=1,
+                    include_graph_related=False,
+                )
+        finally:
+            qc.close()
+
+        self.assertFalse(semantic_search.call_args.kwargs["include_source"])
+        hydrate.assert_called_once()
+        self.assertEqual(payload["results"], hydrated)
 
     def test_search_hydrates_final_results_after_lightweight_query(self) -> None:
         payload = {

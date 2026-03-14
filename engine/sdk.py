@@ -1298,6 +1298,7 @@ class QuickContext:
         related_seed_files: int = 1,
         related_file_limit: int = 8,
         include_graph_related: bool = True,
+        include_source: bool = True,
     ) -> dict:
         """
         Run semantic retrieval and expand related files from the import graph around top hits.
@@ -1320,6 +1321,7 @@ class QuickContext:
             use_keywords=use_keywords,
             keyword_weight=keyword_weight,
             rerank=rerank,
+            include_source=False,
         )
         anchors, semantic_neighbors = self._split_semantic_bundle_results(
             results=results,
@@ -1347,11 +1349,12 @@ class QuickContext:
                 related_file_limit=max(0, related_file_limit - len(prioritized_related)),
             )
         related_callers = self._related_callers_for_results(results)
+        final_anchors = self._hydrate_search_result_sources(anchors) if include_source else anchors
 
         return {
             "query": query,
             "project_name": project,
-            "results": anchors,
+            "results": final_anchors,
             "related_files": prioritized_related[:related_file_limit] + related,
             "related_callers": related_callers,
         }
@@ -1669,19 +1672,19 @@ class QuickContext:
         if not text_result.matches:
             return False
 
-        top = text_result.matches[0]
-        if self._should_skip_lexical_related_path(query, top.file_path):
-            return False
-
         query_keywords = set(extract_keywords(query, max_keywords=20))
-        lexical_hits = len(top.matched_terms)
-        if lexical_hits >= 4:
-            return True
+        for item in text_result.matches[:5]:
+            if self._should_skip_lexical_related_path(query, item.file_path):
+                continue
 
-        if query_keywords:
-            matched = {term.lower() for term in top.matched_terms}
-            if len(query_keywords.intersection(matched)) >= 3:
+            lexical_hits = len(item.matched_terms)
+            if lexical_hits >= 4:
                 return True
+
+            if query_keywords:
+                matched = {term.lower() for term in item.matched_terms}
+                if len(query_keywords.intersection(matched)) >= 3:
+                    return True
 
         return False
 
@@ -1728,11 +1731,19 @@ class QuickContext:
         if not matches:
             return [], []
 
-        primary: list[TextSearchMatch] = [matches[0]]
-        related_pool: list[TextSearchMatch] = []
-        seen_paths = {str(matches[0].file_path)}
+        seed_index = 0
+        for idx, item in enumerate(matches[:5]):
+            if not self._should_skip_lexical_related_path(query, str(item.file_path)):
+                seed_index = idx
+                break
 
-        for item in matches[1:]:
+        primary: list[TextSearchMatch] = [matches[seed_index]]
+        related_pool: list[TextSearchMatch] = []
+        seen_paths = {str(matches[seed_index].file_path)}
+
+        for idx, item in enumerate(matches):
+            if idx == seed_index:
+                continue
             file_path = str(item.file_path)
             if file_path in seen_paths:
                 continue
