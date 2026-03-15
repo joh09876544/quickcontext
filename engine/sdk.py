@@ -3568,6 +3568,11 @@ class QuickContext:
         detected_project = detect_project_name(directory, manual_override=project_name)
         collection = self._get_collection(detected_project)
         file_cache = self._get_file_cache(directory)
+        active_collection_empty = False
+        try:
+            active_collection_empty = (collection.info().get("points_count", 0) or 0) == 0
+        except Exception:
+            active_collection_empty = False
 
         if show_progress:
             print(f"Indexing project: {detected_project}")
@@ -3581,7 +3586,7 @@ class QuickContext:
 
         for entry in scan_entries:
             cached_hash = None
-            if not force_refresh:
+            if not force_refresh and not active_collection_empty:
                 cached_hash = file_cache.is_unchanged_from_metadata(
                     entry.file_path,
                     entry.file_size,
@@ -4116,6 +4121,13 @@ class QuickContext:
         detected_project = detect_project_name(Path(resolved_paths[0]).parent, manual_override=project_name)
         indexer = self._get_indexer(detected_project)
         file_cache = self._get_file_cache(Path(resolved_paths[0]).parent)
+        existing_paths: list[str] = []
+        deleted_paths: list[str] = []
+        for fp in resolved_paths:
+            if Path(fp).exists():
+                existing_paths.append(fp)
+            else:
+                deleted_paths.append(fp)
 
         if show_progress:
             print(f"Refreshing files in project: {detected_project}")
@@ -4123,7 +4135,7 @@ class QuickContext:
 
         paths_to_extract: list[str] = []
         mtime_skipped = 0
-        for fp in resolved_paths:
+        for fp in existing_paths:
             cached_hash = file_cache.is_unchanged(fp)
             if cached_hash is not None:
                 mtime_skipped += 1
@@ -4133,7 +4145,14 @@ class QuickContext:
         if show_progress and mtime_skipped > 0:
             print(f"Skipping {mtime_skipped} files (mtime+size unchanged)")
 
-        if not paths_to_extract:
+        if deleted_paths:
+            if show_progress:
+                print(f"Deleting chunks for {len(deleted_paths)} missing files...")
+            indexer.delete_by_files(deleted_paths)
+            for fp in deleted_paths:
+                file_cache.remove(fp)
+
+        if not paths_to_extract and not deleted_paths:
             if show_progress:
                 print("All files unchanged (mtime cache hit)")
             return IndexStats(

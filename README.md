@@ -229,7 +229,7 @@ python -m engine pattern-search "(function_definition name: (identifier) @name)"
 python -m engine search "chunk filter" --project quickcontext
 python -m engine warm .
 python -m engine benchmark-context --project quickcontext --path . --cases-file scripts/context_retrieval_cases_template.json
-python -m engine refresh engine/src/config.py
+python -m engine refresh engine/src/config.py --project quickcontext
 python -m engine watch .
 python -m engine list-projects
 python -m engine status

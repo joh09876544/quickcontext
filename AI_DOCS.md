@@ -142,7 +142,7 @@ Common SDK and engine flow:
 - `python -m engine benchmark-context --project <name> --path <target-root> --cases-file <cases.json>`
 - `python -m engine index <path> [--project <name>]`
 - `python -m engine search "<query>" [--project <name>]`
-- `python -m engine refresh <files...>`
+- `python -m engine refresh <files...> [--project <name>]`
 - `python -m engine watch <dir>`
 
 Use the CLI to validate and benchmark the same underlying service and SDK behavior. Do not treat CLI startup as the main product surface.

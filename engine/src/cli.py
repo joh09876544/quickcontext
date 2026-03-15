@@ -569,8 +569,9 @@ def index(
 
 
 @cli.command()
-@click.argument("files", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("files", nargs=-1, type=click.Path(exists=False, dir_okay=False, path_type=Path))
 @click.option("--quiet", is_flag=True, help="Suppress progress messages.")
+@click.option("--project", default=None, help="Project name override. Required when refreshing files for a non-default project.")
 @click.option("--fast", is_flag=True, help="Fast refresh mode: skip descriptions and use stricter chunk filtering.")
 @click.option("--target-seconds", default=None, type=int, help="SLA mode target duration in seconds. Applies aggressive speed defaults when <= 60 unless explicitly overridden.")
 @click.option("--no-descriptions", is_flag=True, help="Skip LLM description generation and use lightweight fallback descriptions.")
@@ -590,6 +591,7 @@ def refresh(
     ctx: click.Context,
     files: tuple[Path, ...],
     quiet: bool,
+    project: str | None,
     fast: bool,
     target_seconds: int | None,
     no_descriptions: bool,
@@ -654,6 +656,7 @@ def refresh(
             stats = qc.refresh_files(
                 file_paths=list(files),
                 show_progress=not quiet,
+                project_name=project,
                 fast=effective_fast,
                 generate_descriptions=not effective_no_descriptions,
                 min_chunk_bytes=effective_min_chunk_bytes,
