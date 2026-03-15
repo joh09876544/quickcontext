@@ -2672,6 +2672,32 @@ class RegressionTests(unittest.TestCase):
             clear_state(tmp, "demo")
             self.assertIsNone(load_state(tmp, "demo"))
 
+    def test_refresh_files_deletes_missing_paths_without_extracting(self) -> None:
+        qc = QuickContext(EngineConfig())
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing.py"
+            cache = FileSignatureCache(tmp)
+            fake_indexer = mock.Mock()
+            with mock.patch.object(qc, "_get_indexer", return_value=fake_indexer), mock.patch.object(
+                qc,
+                "_get_file_cache",
+                return_value=cache,
+            ), mock.patch.object(
+                qc,
+                "extract_symbols",
+                side_effect=AssertionError("missing files should not be extracted"),
+            ):
+                stats = qc.refresh_files(
+                    file_paths=[missing],
+                    show_progress=False,
+                    project_name="demo",
+                    generate_descriptions=False,
+                )
+
+        fake_indexer.delete_by_files.assert_called_once_with([str(missing.resolve())])
+        self.assertEqual(stats.total_chunks, 0)
+        self.assertEqual(stats.upserted_points, 0)
+
 
 class LazyImportBoundaryTests(unittest.TestCase):
     def _reload_module(self, module_name: str):
