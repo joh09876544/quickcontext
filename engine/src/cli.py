@@ -11,6 +11,7 @@ from rich.table import Table
 
 from engine import QuickContext
 from engine.src.config import EngineConfig
+from engine.src.keywords import extract_keywords
 from engine.src.project import detect_project_name
 
 
@@ -48,6 +49,72 @@ def _benchmark_coverage(paths: list[str], expected_paths: list[str], limit: int)
         if any(fragment_lower in _normalize_benchmark_path(path) for path in paths[:limit]):
             matched += 1
     return matched / len(expected_paths)
+
+
+def _grep_baseline_paths(
+    qc: QuickContext,
+    query: str,
+    target_root: Path,
+    limit: int,
+    keyword_limit: int = 6,
+    per_keyword_limit: int = 40,
+) -> list[str]:
+    keywords = extract_keywords(query, max_keywords=keyword_limit)
+    if not keywords:
+        return []
+
+    aggregate: dict[str, dict[str, Any]] = {}
+    for rank, keyword in enumerate(keywords):
+        try:
+            result = qc.grep_text(
+                query=keyword,
+                path=target_root,
+                limit=per_keyword_limit,
+            )
+        except Exception:
+            continue
+
+        for match in result.matches:
+            key = _relative_benchmark_path(match.file_path, target_root)
+            state = aggregate.setdefault(
+                key,
+                {
+                    "keywords": set(),
+                    "hits": 0,
+                    "best_keyword_rank": rank,
+                },
+            )
+            state["keywords"].add(keyword)
+            state["hits"] += 1
+            state["best_keyword_rank"] = min(state["best_keyword_rank"], rank)
+
+    ranked = sorted(
+        aggregate.items(),
+        key=lambda item: (
+            -len(item[1]["keywords"]),
+            -item[1]["hits"],
+            item[1]["best_keyword_rank"],
+            item[0],
+        ),
+    )
+    return [path for path, _ in ranked[: max(limit, 1)]]
+
+
+def _print_strategy_summary(name: str, rows: list[dict], limit: int) -> None:
+    hit_ranks = [row["hit_rank"] for row in rows]
+    latencies = [row["latency_ms"] for row in rows]
+    hit1 = sum(1 for rank in hit_ranks if rank == 1)
+    hit3 = sum(1 for rank in hit_ranks if rank is not None and rank <= 3)
+    mrr = sum(0.0 if rank is None else 1.0 / rank for rank in hit_ranks) / len(hit_ranks)
+    coverage = sum(row["coverage"] for row in rows) / len(rows)
+
+    console.print(f"\n[bold]{name}[/bold]")
+    console.print(f"  Hit@1: {hit1}/{len(rows)}")
+    console.print(f"  Hit@3: {hit3}/{len(rows)}")
+    console.print(f"  MRR: {mrr:.4f}")
+    console.print(f"  Mean top-{limit} coverage: {coverage:.4f}")
+    console.print(f"  Mean latency: {mean(latencies):.2f} ms")
+    console.print(f"  Median latency: {median(latencies):.2f} ms")
 
 
 def _load_config(config_path: str | None) -> EngineConfig:
@@ -1472,6 +1539,142 @@ def benchmark_context(
         for idx, path in enumerate(row["result_paths"][: max(show_top, 1)], 1):
             console.print(f"  {idx}. {path}")
         console.print()
+
+
+@cli.command("benchmark-compare")
+@click.option("--project", default=None, help="Indexed project name. Auto-detected from --path if omitted.")
+@click.option("--path", "target_path", required=True, type=click.Path(exists=True, path_type=Path), help="Target repo root to benchmark.")
+@click.option("--cases-file", required=True, type=click.Path(exists=True, path_type=Path), help="JSON file containing benchmark cases.")
+@click.option("--limit", default=3, type=int, show_default=True, help="Primary result limit.")
+@click.option("--grep-keywords", default=6, type=int, show_default=True, help="Maximum query keywords used by the grep baseline.")
+@click.option("--grep-per-keyword-limit", default=40, type=int, show_default=True, help="Per-keyword grep result cap.")
+@click.option("--show-top", default=1, type=int, show_default=True, help="Show the top N paths per strategy per query.")
+@click.pass_context
+def benchmark_compare(
+    ctx: click.Context,
+    project: str | None,
+    target_path: Path,
+    cases_file: Path,
+    limit: int,
+    grep_keywords: int,
+    grep_per_keyword_limit: int,
+    show_top: int,
+) -> None:
+    """
+    Compare grep, Rust text search, and AI-facing mixed retrieval on the same case file.
+    """
+    config = _optimize_search_config(ctx.obj["config"])
+    target_root = target_path.resolve()
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    project_name = project if project else detect_project_name(target_root, manual_override=None)
+
+    grep_rows: list[dict] = []
+    text_rows: list[dict] = []
+    context_rows: list[dict] = []
+
+    with QuickContext(config) as qc:
+        warmup_query = str(cases[0]["query"]) if cases else "warm project"
+        try:
+            qc.warm_project(path=target_root)
+        except Exception:
+            pass
+        try:
+            qc.retrieve_context_auto(
+                query=warmup_query,
+                project_name=project_name,
+                path=target_root,
+                limit=1,
+            )
+        except Exception:
+            pass
+
+        for case in cases:
+            query = str(case["query"])
+            expected_paths = [str(path) for path in case["expected_paths"]]
+
+            started = time.perf_counter()
+            grep_paths = _grep_baseline_paths(
+                qc=qc,
+                query=query,
+                target_root=target_root,
+                limit=limit,
+                keyword_limit=grep_keywords,
+                per_keyword_limit=grep_per_keyword_limit,
+            )
+            grep_latency_ms = (time.perf_counter() - started) * 1000
+            grep_rows.append(
+                {
+                    "query": query,
+                    "paths": grep_paths,
+                    "hit_rank": _benchmark_match_rank(grep_paths, expected_paths),
+                    "coverage": _benchmark_coverage(grep_paths, expected_paths, limit=max(limit, 1)),
+                    "latency_ms": grep_latency_ms,
+                }
+            )
+
+            started = time.perf_counter()
+            text_result = qc.text_search(
+                query=query,
+                path=target_root,
+                limit=limit,
+                intent_mode=True,
+                intent_level=2,
+            )
+            text_latency_ms = (time.perf_counter() - started) * 1000
+            text_paths = [_relative_benchmark_path(item.file_path, target_root) for item in text_result.matches[: max(limit, 1)]]
+            text_rows.append(
+                {
+                    "query": query,
+                    "paths": text_paths,
+                    "hit_rank": _benchmark_match_rank(text_paths, expected_paths),
+                    "coverage": _benchmark_coverage(text_paths, expected_paths, limit=max(limit, 1)),
+                    "latency_ms": text_latency_ms,
+                }
+            )
+
+            started = time.perf_counter()
+            payload = qc.retrieve_context_auto(
+                query=query,
+                project_name=project_name,
+                path=target_root,
+                limit=limit,
+                related_file_limit=8,
+            )
+            context_latency_ms = (time.perf_counter() - started) * 1000
+            context_paths = [_relative_benchmark_path(item.file_path, target_root) for item in payload["results"][: max(limit, 1)]]
+            context_rows.append(
+                {
+                    "query": query,
+                    "paths": context_paths,
+                    "hit_rank": _benchmark_match_rank(context_paths, expected_paths),
+                    "coverage": _benchmark_coverage(context_paths, expected_paths, limit=max(limit, 1)),
+                    "latency_ms": context_latency_ms,
+                    "mode": payload.get("mode"),
+                }
+            )
+
+    console.print(f"\n[bold]Benchmark Compare[/bold]")
+    console.print(f"  Cases: {len(cases)}")
+    console.print(f"  Project: {project_name}")
+    console.print(f"  Path: {target_root}")
+    _print_strategy_summary("grep-baseline", grep_rows, limit)
+    _print_strategy_summary("text-search", text_rows, limit)
+    _print_strategy_summary("context-auto", context_rows, limit)
+
+    for idx, case in enumerate(cases):
+        console.print(f"\n[bold]{case['query']}[/bold]")
+        console.print(f"  grep hit_rank: {grep_rows[idx]['hit_rank'] if grep_rows[idx]['hit_rank'] is not None else 'miss'}")
+        for rank, path in enumerate(grep_rows[idx]["paths"][: max(show_top, 1)], 1):
+            console.print(f"    grep {rank}. {path}")
+        console.print(f"  text hit_rank: {text_rows[idx]['hit_rank'] if text_rows[idx]['hit_rank'] is not None else 'miss'}")
+        for rank, path in enumerate(text_rows[idx]["paths"][: max(show_top, 1)], 1):
+            console.print(f"    text {rank}. {path}")
+        console.print(
+            f"  context hit_rank: {context_rows[idx]['hit_rank'] if context_rows[idx]['hit_rank'] is not None else 'miss'}"
+            f" (mode={context_rows[idx]['mode']})"
+        )
+        for rank, path in enumerate(context_rows[idx]["paths"][: max(show_top, 1)], 1):
+            console.print(f"    context {rank}. {path}")
 
 
 @cli.command()

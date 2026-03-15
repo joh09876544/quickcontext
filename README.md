@@ -229,6 +229,7 @@ python -m engine pattern-search "(function_definition name: (identifier) @name)"
 python -m engine search "chunk filter" --project quickcontext
 python -m engine warm .
 python -m engine benchmark-context --project quickcontext --path . --cases-file scripts/context_retrieval_cases_template.json
+python -m engine benchmark-compare --project quickcontext --path . --cases-file scripts/context_retrieval_cases_template.json
 python -m engine refresh engine/src/config.py --project quickcontext
 python -m engine watch .
 python -m engine list-projects
@@ -248,6 +249,7 @@ venv/Scripts/python.exe scripts/retrieval_benchmark.py --config quickcontext.jso
 venv/Scripts/python.exe scripts/context_retrieval_benchmark.py --config quickcontext.json --project quickcontext --cases-file scripts/context_retrieval_cases.json --strategy context-auto
 venv/Scripts/python.exe scripts/context_retrieval_benchmark.py --config quickcontext.json --project external-bench --path <target-root> --cases-file scripts/augmentintent_dist_cases.json --strategy context-auto
 venv/Scripts/python.exe -m engine --config quickcontext.json benchmark-context --project external-bench --path <target-root> --cases-file scripts/context_retrieval_cases_template.json --strategy context-auto
+venv/Scripts/python.exe -m engine --config quickcontext.json benchmark-compare --project external-bench --path <target-root> --cases-file scripts/context_retrieval_cases_template.json
 venv/Scripts/python.exe scripts/symbol_context_benchmark.py --config quickcontext.json --project quickcontext --cases-file scripts/symbol_context_cases.json --strategy context-auto
 venv/Scripts/python.exe scripts/context_retrieval_benchmark.py --config quickcontext.json --project quickcontext --cases-file scripts/graph_retrieval_cases.json --strategy context-auto
 venv/Scripts/python.exe scripts/text_retrieval_benchmark.py --config quickcontext.json --cases-file scripts/context_retrieval_cases.json --show-top 3
