@@ -1617,9 +1617,45 @@ class QuickContext:
                         limit=limit,
                         related_file_limit=related_file_limit,
                     )
+            else:
+                text_result = None
 
             if should_use_bundle:
-                bundle = self.semantic_search_bundle(
+                try:
+                    bundle = self.semantic_search_bundle(
+                        query=query,
+                        mode=mode,
+                        limit=limit,
+                        language=language,
+                        path_prefix=path_prefix,
+                        project_name=project,
+                        use_keywords=use_keywords,
+                        keyword_weight=keyword_weight,
+                        rerank=rerank,
+                        related_seed_files=related_seed_files,
+                        related_file_limit=related_file_limit,
+                        include_graph_related=should_use_graph_related,
+                        path=retrieval_root,
+                    )
+                except Exception as exc:
+                    fallback = self._text_fallback_payload_for_vector_error(
+                        exc=exc,
+                        query=query,
+                        project_name=project,
+                        path=retrieval_root,
+                        limit=limit,
+                        related_file_limit=related_file_limit,
+                        text_result=text_result,
+                    )
+                    if fallback is not None:
+                        return fallback
+                    raise
+                bundle["mode"] = "bundle"
+                bundle["symbol_query"] = None
+                return bundle
+
+            try:
+                payload = self.semantic_search_auto(
                     query=query,
                     mode=mode,
                     limit=limit,
@@ -1631,28 +1667,22 @@ class QuickContext:
                     rerank=rerank,
                     related_seed_files=related_seed_files,
                     related_file_limit=related_file_limit,
-                    include_graph_related=should_use_graph_related,
+                    include_source=False,
                     path=retrieval_root,
                 )
-                bundle["mode"] = "bundle"
-                bundle["symbol_query"] = None
-                return bundle
-
-            payload = self.semantic_search_auto(
-                query=query,
-                mode=mode,
-                limit=limit,
-                language=language,
-                path_prefix=path_prefix,
-                project_name=project,
-                use_keywords=use_keywords,
-                keyword_weight=keyword_weight,
-                rerank=rerank,
-                related_seed_files=related_seed_files,
-                related_file_limit=related_file_limit,
-                include_source=False,
-                path=retrieval_root,
-            )
+            except Exception as exc:
+                fallback = self._text_fallback_payload_for_vector_error(
+                    exc=exc,
+                    query=query,
+                    project_name=project,
+                    path=retrieval_root,
+                    limit=limit,
+                    related_file_limit=related_file_limit,
+                    text_result=text_result,
+                )
+                if fallback is not None:
+                    return fallback
+                raise
             payload["symbol_query"] = None
             if payload.get("mode") == "search":
                 lexical_related = self._lexical_related_files_for_query(
@@ -1690,6 +1720,57 @@ class QuickContext:
                     )
                 payload["results"] = self._hydrate_search_result_sources(payload["results"])
             return payload
+
+    def _text_fallback_payload_for_vector_error(
+        self,
+        exc: Exception,
+        query: str,
+        project_name: str,
+        path: str | Path,
+        limit: int,
+        related_file_limit: int,
+        text_result: TextSearchResult | None = None,
+    ) -> dict | None:
+        """
+        Fall back to Rust text retrieval when vector search is unavailable for a target project.
+        """
+        if not self._looks_like_missing_vector_index_error(exc):
+            return None
+
+        if text_result is None:
+            try:
+                text_result = self.text_search(
+                    query=query,
+                    path=path,
+                    limit=max(limit + related_file_limit, 8),
+                    intent_mode=True,
+                    intent_level=2,
+                )
+            except Exception:
+                return None
+
+        if not text_result or not text_result.matches:
+            return None
+
+        return self._text_primary_payload(
+            query=query,
+            project_name=project_name,
+            text_result=text_result,
+            limit=limit,
+            related_file_limit=related_file_limit,
+        )
+
+    def _looks_like_missing_vector_index_error(self, exc: Exception) -> bool:
+        """
+        Detect missing or uninitialized vector-search collections for semantic retrieval.
+        """
+        message = str(exc).lower()
+        return (
+            "404 client error" in message
+            or ("collection" in message and "not found" in message)
+            or "/points/query/batch" in message
+            or "/points/query" in message
+        )
 
     def structured_search(
         self,

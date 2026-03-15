@@ -39,7 +39,7 @@ const COMPLEXITY_THRESHOLD: usize = 5;
 const REFERENCE_THRESHOLD: usize = 5;
 
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileCategory {
     Source,
     Test,

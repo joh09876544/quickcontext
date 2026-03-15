@@ -7,17 +7,12 @@ use crate::intent::{build_intent_terms, normalize_intent_level, IntentTerms};
 use crate::lang::LanguageSpec;
 use crate::query_parser::{ParsedQuery, QueryExpr, QueryParser};
 use crate::ranking::Bm25Scorer;
-use crate::structural_boost;
+use crate::structural_boost::{self, FileCategory};
 use crate::text_index::{search_candidates, IndexedCandidate};
 use crate::types::{TextSearchMatch, TextSearchResult};
 
 const SNIPPET_CONTEXT_LINES: usize = 3;
 const TOOLING_FILE_PENALTY: f64 = 0.15;
-const DOC_FILE_QUERY_PENALTY: f64 = 0.45;
-const TEST_FILE_QUERY_PENALTY: f64 = 0.45;
-const GENERATED_BUNDLE_FILE_PENALTY: f64 = 0.18;
-const GENERIC_WRAPPER_FILE_PENALTY: f64 = 0.78;
-const GENERIC_ENTRYPOINT_FILE_PENALTY: f64 = 0.72;
 const PATH_KEYWORD_BASE_BOOST: f64 = 0.16;
 const PATH_KEYWORD_BASENAME_BOOST: f64 = 0.10;
 const PATH_KEYWORD_MAX_BOOST: f64 = 1.42;
@@ -178,8 +173,7 @@ fn score_and_rank(
             continue;
         }
 
-        let category_boost =
-            structural_boost::compute_category_boost(structural_boost::classify_file(&candidate.file_path));
+        let category_boost = compute_query_aware_category_boost(candidate.category, &query_terms);
         let coverage_boost = structural_boost::compute_coverage_boost(&query_terms, &content);
         let role_boost =
             structural_boost::compute_role_boost(structural_boost::classify_role_from_content(&content));
@@ -234,8 +228,7 @@ fn score_and_rank_fast(
     let mut scored: Vec<(usize, f64)> = Vec::new();
 
     for (idx, candidate) in candidates.iter().enumerate() {
-        let category_boost =
-            structural_boost::compute_category_boost(structural_boost::classify_file(&candidate.file_path));
+        let category_boost = compute_query_aware_category_boost(candidate.category, query_terms);
         let coverage_boost = compute_matched_term_coverage_boost(&candidate.matched_terms, query_terms);
         let tooling_penalty = compute_tooling_path_penalty(&candidate.file_path, query_terms);
         let path_boost = compute_path_keyword_boost(&candidate.file_path, query_terms);
@@ -480,66 +473,17 @@ fn extract_snippet(content: &str, matched_terms: &[String]) -> (String, usize, u
 
 fn compute_tooling_path_penalty(path: &str, query_terms: &[String]) -> f64 {
     let normalized_path = path.to_ascii_lowercase().replace('\\', "/");
-    let mut penalty = 1.0;
-    let tooling_terms = [
-        "benchmark",
-        "latency",
-        "coverage",
-        "phase",
-        "tooling",
-        "script",
-        "scripts",
-        "instrumentation",
-        "timing",
-    ];
-    let query_is_tooling = query_terms
-        .iter()
-        .any(|term| tooling_terms.iter().any(|tool| term == tool));
+    let query_is_tooling = query_is_tooling_focused(query_terms);
     let is_tooling_path = normalized_path.contains("/scripts/")
         || normalized_path.starts_with("scripts/")
         || normalized_path.contains("benchmark")
         || normalized_path.ends_with("_cases.json")
         || normalized_path.ends_with(".bench.rs");
     if is_tooling_path && !query_is_tooling {
-        penalty *= TOOLING_FILE_PENALTY;
+        return TOOLING_FILE_PENALTY;
     }
 
-    let doc_terms = ["doc", "docs", "documentation", "readme", "guide", "guides", "manual"];
-    let query_is_doc_focused = query_terms
-        .iter()
-        .any(|term| doc_terms.iter().any(|doc| term == doc));
-    let is_doc_path = normalized_path.ends_with(".md")
-        || normalized_path.ends_with(".rst")
-        || normalized_path.contains("/docs/")
-        || normalized_path.contains("/doc/")
-        || normalized_path.ends_with("readme")
-        || normalized_path.ends_with("readme.md")
-        || normalized_path.ends_with("ai_docs.md");
-    if is_doc_path && !query_is_doc_focused {
-        penalty *= DOC_FILE_QUERY_PENALTY;
-    }
-
-    let test_terms = ["test", "tests", "spec", "specs", "regression", "unittest", "pytest"];
-    let query_is_test_focused = query_terms
-        .iter()
-        .any(|term| test_terms.iter().any(|test| term == test));
-    let is_test_path = normalized_path.contains("/tests/")
-        || normalized_path.contains("/test/")
-        || normalized_path.contains("/__tests__/")
-        || normalized_path.ends_with(".test.ts")
-        || normalized_path.ends_with(".test.js")
-        || normalized_path.ends_with("_test.py")
-        || normalized_path.ends_with("_spec.py")
-        || normalized_path.contains("test_regressions.py");
-    if is_test_path && !query_is_test_focused {
-        penalty *= TEST_FILE_QUERY_PENALTY;
-    }
-
-    if is_generated_bundle_path(&normalized_path) && !query_is_renderer_focused(query_terms) {
-        penalty *= GENERATED_BUNDLE_FILE_PENALTY;
-    }
-
-    penalty * compute_wrapper_path_penalty(&normalized_path, query_terms)
+    1.0
 }
 
 fn compute_path_keyword_boost(path: &str, query_terms: &[String]) -> f64 {
@@ -636,13 +580,6 @@ fn is_low_signal_path_token(token: &str) -> bool {
     )
 }
 
-fn is_generated_bundle_path(path: &str) -> bool {
-    path.contains("/app/immutable/")
-        || path.contains("/immutable/chunks/")
-        || path.contains("/immutable/nodes/")
-        || path.contains("/immutable/workers/")
-}
-
 fn query_is_renderer_focused(query_terms: &[String]) -> bool {
     let renderer_terms = [
         "asset",
@@ -671,62 +608,52 @@ fn query_is_renderer_focused(query_terms: &[String]) -> bool {
         .any(|term| renderer_terms.iter().any(|candidate| term == candidate))
 }
 
-fn compute_wrapper_path_penalty(path: &str, query_terms: &[String]) -> f64 {
-    if query_terms.len() < 3 {
-        return 1.0;
-    }
+fn query_is_doc_focused(query_terms: &[String]) -> bool {
+    let doc_terms = ["doc", "docs", "documentation", "readme", "guide", "guides", "manual"];
+    query_terms
+        .iter()
+        .any(|term| doc_terms.iter().any(|candidate| term == candidate))
+}
 
-    let filename = Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    let basename = filename
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+fn query_is_test_focused(query_terms: &[String]) -> bool {
+    let test_terms = ["test", "tests", "spec", "specs", "regression", "unittest", "pytest"];
+    query_terms
+        .iter()
+        .any(|term| test_terms.iter().any(|candidate| term == candidate))
+}
 
-    let mentions = |terms: &[&str]| -> bool {
-        query_terms
-            .iter()
-            .any(|term| terms.iter().any(|candidate| term == candidate))
-    };
+fn query_is_config_focused(query_terms: &[String]) -> bool {
+    let config_terms = ["config", "configs", "configuration", "settings", "schema", "schemas"];
+    query_terms
+        .iter()
+        .any(|term| config_terms.iter().any(|candidate| term == candidate))
+}
 
-    let mut penalty = 1.0;
+fn query_is_tooling_focused(query_terms: &[String]) -> bool {
+    let tooling_terms = [
+        "benchmark",
+        "latency",
+        "coverage",
+        "phase",
+        "tooling",
+        "script",
+        "scripts",
+        "instrumentation",
+        "timing",
+    ];
+    query_terms
+        .iter()
+        .any(|term| tooling_terms.iter().any(|candidate| term == candidate))
+}
 
-    let is_shallow_entry = filename == "index.js"
-        && (path == "main/index.js"
-            || path == "preload/index.js"
-            || path == "shared/index.js"
-            || path.ends_with("/main/index.js")
-            || path.ends_with("/preload/index.js")
-            || path.ends_with("/shared/index.js"));
-    if is_shallow_entry && !mentions(&["index", "entry", "entrypoint", "bootstrap", "startup", "init", "initialize"]) {
-        penalty *= GENERIC_ENTRYPOINT_FILE_PENALTY;
+fn compute_query_aware_category_boost(category: FileCategory, query_terms: &[String]) -> f64 {
+    match category {
+        FileCategory::Documentation if query_is_doc_focused(query_terms) => 1.0,
+        FileCategory::Test if query_is_test_focused(query_terms) => 1.0,
+        FileCategory::Config if query_is_config_focused(query_terms) => 1.0,
+        FileCategory::Generated if query_is_renderer_focused(query_terms) => 1.0,
+        _ => structural_boost::compute_category_boost(category),
     }
-
-    if filename.ends_with(".ipc.js") && !mentions(&["ipc", "channel", "channels", "invoke", "message", "messages"]) {
-        penalty *= GENERIC_WRAPPER_FILE_PENALTY;
-    }
-    if basename.ends_with("tools") && !mentions(&["tool", "tools"]) {
-        penalty *= GENERIC_WRAPPER_FILE_PENALTY;
-    }
-    if basename.ends_with("bridge") && !mentions(&["bridge", "bridges"]) {
-        penalty *= GENERIC_WRAPPER_FILE_PENALTY;
-    }
-    if basename.ends_with("adapter") && !mentions(&["adapter", "adapters", "protocol", "protocols"]) {
-        penalty *= GENERIC_WRAPPER_FILE_PENALTY;
-    }
-    if basename.ends_with("provider") && !mentions(&["provider", "providers", "model", "models"]) {
-        penalty *= GENERIC_WRAPPER_FILE_PENALTY;
-    }
-    if matches!(basename.as_str(), "types" | "constants" | "schemas")
-        && !mentions(&["type", "types", "constant", "constants", "schema", "schemas"])
-    {
-        penalty *= GENERIC_WRAPPER_FILE_PENALTY;
-    }
-
-    penalty
 }
 
 
@@ -777,58 +704,59 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_tooling_path_penalty_penalizes_docs_for_non_doc_queries() {
+    fn test_compute_query_aware_category_boost_penalizes_docs_for_non_doc_queries() {
         let query_terms = vec!["python".to_string(), "connect".to_string(), "linux".to_string()];
-        let penalty = compute_tooling_path_penalty("AI_DOCS.md", &query_terms);
-        assert!(penalty < 1.0);
+        let boost = compute_query_aware_category_boost(FileCategory::Documentation, &query_terms);
+        assert!(boost < 1.0);
     }
 
     #[test]
-    fn test_compute_tooling_path_penalty_keeps_docs_for_doc_queries() {
+    fn test_compute_query_aware_category_boost_keeps_docs_for_doc_queries() {
         let query_terms = vec!["docs".to_string(), "readme".to_string()];
-        let penalty = compute_tooling_path_penalty("AI_DOCS.md", &query_terms);
-        assert_eq!(penalty, 1.0);
+        let boost = compute_query_aware_category_boost(FileCategory::Documentation, &query_terms);
+        assert_eq!(boost, 1.0);
     }
 
     #[test]
-    fn test_compute_tooling_path_penalty_penalizes_tests_for_non_test_queries() {
+    fn test_compute_query_aware_category_boost_penalizes_tests_for_non_test_queries() {
         let query_terms = vec!["python".to_string(), "connect".to_string(), "linux".to_string()];
-        let penalty = compute_tooling_path_penalty("engine/tests/test_regressions.py", &query_terms);
-        assert!(penalty < 1.0);
+        let boost = compute_query_aware_category_boost(FileCategory::Test, &query_terms);
+        assert!(boost < 1.0);
     }
 
     #[test]
-    fn test_compute_tooling_path_penalty_keeps_tests_for_test_queries() {
+    fn test_compute_query_aware_category_boost_keeps_tests_for_test_queries() {
         let query_terms = vec!["test".to_string(), "regression".to_string()];
-        let penalty = compute_tooling_path_penalty("engine/tests/test_regressions.py", &query_terms);
-        assert_eq!(penalty, 1.0);
+        let boost = compute_query_aware_category_boost(FileCategory::Test, &query_terms);
+        assert_eq!(boost, 1.0);
     }
 
     #[test]
-    fn test_compute_tooling_path_penalty_penalizes_generated_renderer_chunks_for_non_ui_queries() {
+    fn test_compute_query_aware_category_boost_penalizes_generated_for_non_renderer_queries() {
         let query_terms = vec!["event".to_string(), "storage".to_string(), "notification".to_string()];
-        let penalty = compute_tooling_path_penalty(
-            "renderer/app/immutable/chunks/BLk-YuGw.js",
-            &query_terms,
-        );
-        assert!(penalty < 1.0);
+        let boost = compute_query_aware_category_boost(FileCategory::Generated, &query_terms);
+        assert!(boost < 1.0);
     }
 
     #[test]
-    fn test_compute_tooling_path_penalty_keeps_generated_renderer_chunks_for_renderer_queries() {
+    fn test_compute_query_aware_category_boost_keeps_generated_for_renderer_queries() {
         let query_terms = vec!["renderer".to_string(), "component".to_string(), "chunk".to_string()];
-        let penalty = compute_tooling_path_penalty(
-            "renderer/app/immutable/chunks/BLk-YuGw.js",
-            &query_terms,
-        );
-        assert_eq!(penalty, 1.0);
+        let boost = compute_query_aware_category_boost(FileCategory::Generated, &query_terms);
+        assert_eq!(boost, 1.0);
     }
 
     #[test]
-    fn test_compute_tooling_path_penalty_penalizes_generic_wrapper_files_for_non_wrapper_queries() {
-        let query_terms = vec!["mcp".to_string(), "hub".to_string(), "restart".to_string(), "server".to_string()];
-        let penalty = compute_tooling_path_penalty("main/index.js", &query_terms);
-        assert!(penalty < 1.0);
+    fn test_compute_query_aware_category_boost_keeps_config_for_config_queries() {
+        let query_terms = vec!["config".to_string(), "schema".to_string()];
+        let boost = compute_query_aware_category_boost(FileCategory::Config, &query_terms);
+        assert_eq!(boost, 1.0);
+    }
+
+    #[test]
+    fn test_compute_tooling_path_penalty_does_not_penalize_non_tooling_files() {
+        let query_terms = vec!["mcp".to_string(), "hub".to_string(), "server".to_string()];
+        let penalty = compute_tooling_path_penalty("features/mcp/main/hub/mcp-hub.js", &query_terms);
+        assert_eq!(penalty, 1.0);
     }
 
     #[test]

@@ -67,6 +67,7 @@ Important config ideas:
 - cloud example config uses `litellm`
 - embedding dimensions must match the Qdrant collection vector dimensions
 - the Rust symbol index snapshot lives in `.quickcontext/symbol_index.redb` and uses a compact binary payload format for faster cold loads
+- the persisted Rust text index also stores file-category and path-field metadata so text search can blend content and path signals while downweighting low-priority file classes
 - Rust extraction also reuses compiled tree-sitter queries across parses to reduce repeated extractor overhead
 
 ## Important Python Modules
@@ -87,7 +88,7 @@ Important config ideas:
 
 Useful SDK retrieval primitives:
 
-- `QuickContext.retrieve_context_auto(...)`: default AI entrypoint; routes exact symbol questions to symbol lookup, expands behavior-oriented exact-symbol questions with helper symbols from the same implementation file using file-scoped Rust symbol-index metadata plus targeted source hydration, can use Rust text search as the primary path for strong non-symbol technical queries, attaches scoped graph-lexical companions for import/dependency-style graph questions, and accepts explicit `path=` scoping when the target repo is outside the current process cwd
+- `QuickContext.retrieve_context_auto(...)`: default AI entrypoint; routes exact symbol questions to symbol lookup, expands behavior-oriented exact-symbol questions with helper symbols from the same implementation file using file-scoped Rust symbol-index metadata plus targeted source hydration, can use Rust text search as the primary path for strong non-symbol technical queries, attaches scoped graph-lexical companions for import/dependency-style graph questions, accepts explicit `path=` scoping when the target repo is outside the current process cwd, and falls back to Rust text retrieval when an external repo has not been vector-indexed yet
 - `QuickContext.warm_project(...)`: preload persisted Rust symbol and text indices for a project root before the first real query
 - `QuickContext.start_background_warm(...)`: schedule the same Rust warmup to run once the SDK session goes idle instead of blocking startup
 - `QuickContext.semantic_search(...)`: main semantic retrieval path; accepts explicit `path=` scoping for external repos when parser/text-first helpers still need the correct root

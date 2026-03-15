@@ -11,15 +11,22 @@ use serde::{Deserialize, Serialize};
 use crate::extract::{collect_file_signatures_fast, ExtractOptions};
 use crate::lang::{self, LanguageSpec};
 use crate::query_parser::SearchFilter;
+use crate::structural_boost::{self, FileCategory};
 use crate::tokenizer::Tokenizer;
 
 const STATE_KEY: &str = "state";
 const SNAPSHOT_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("snapshot");
-const TEXT_INDEX_SCHEMA_VERSION: u32 = 2;
+const TEXT_INDEX_SCHEMA_VERSION: u32 = 3;
 const BM25_K1: f64 = 1.5;
 const BM25_B: f64 = 0.5;
+const PATH_BM25_WEIGHT: f64 = 0.5;
+const PATH_BASENAME_TERM_BOOST: u32 = 4;
 const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
 const REFRESH_DEBOUNCE_MS: u128 = 5000;
+
+fn default_file_category() -> FileCategory {
+    FileCategory::Source
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TextDocRecord {
@@ -29,6 +36,12 @@ struct TextDocRecord {
     signature: u64,
     term_freq: Vec<(String, u32)>,
     doc_len: usize,
+    #[serde(default)]
+    path_term_freq: Vec<(String, u32)>,
+    #[serde(default)]
+    path_doc_len: usize,
+    #[serde(default = "default_file_category")]
+    category: FileCategory,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +64,9 @@ struct ProjectTextIndex {
     docs: HashMap<u32, TextDocRecord>,
     path_to_doc_id: HashMap<String, u32>,
     postings: HashMap<String, HashMap<u32, u32>>,
+    path_postings: HashMap<String, HashMap<u32, u32>>,
     total_doc_len: usize,
+    total_path_doc_len: usize,
     next_doc_id: u32,
     last_refresh_check_ms: u128,
 }
@@ -67,6 +82,7 @@ pub struct IndexedCandidate {
     pub language: String,
     pub score: f64,
     pub matched_terms: Vec<String>,
+    pub category: FileCategory,
 }
 
 static GLOBAL_TEXT_INDEX_MANAGER: OnceLock<Mutex<TextIndexManager>> = OnceLock::new();
@@ -262,7 +278,9 @@ fn build_index(
         docs: HashMap::new(),
         path_to_doc_id: HashMap::new(),
         postings: HashMap::new(),
+        path_postings: HashMap::new(),
         total_doc_len: 0,
+        total_path_doc_len: 0,
         next_doc_id: 0,
         last_refresh_check_ms: now_ms(),
     };
@@ -272,7 +290,7 @@ fn build_index(
             index.file_signatures.insert(path, sig);
             continue;
         }
-        if upsert_doc(&mut index, &path, sig, specs, None) {
+        if upsert_doc(&mut index, project_root, &path, sig, specs, None) {
             index.file_signatures.insert(path, sig);
         }
     }
@@ -326,7 +344,7 @@ fn reconcile_index(
         }
 
         let reuse_id = index.path_to_doc_id.get(path).copied();
-        if upsert_doc(index, path, *sig, specs, reuse_id) {
+        if upsert_doc(index, project_root, path, *sig, specs, reuse_id) {
             next_signatures.insert(path.clone(), *sig);
             changed = true;
         }
@@ -366,6 +384,7 @@ fn mark_non_indexable_path(
 
 fn upsert_doc(
     index: &mut ProjectTextIndex,
+    project_root: &Path,
     file_path: &str,
     signature: u64,
     specs: &[LanguageSpec],
@@ -387,6 +406,9 @@ fn upsert_doc(
 
     let term_freq = tokenizer().tokenize_with_frequency(&source);
     let doc_len: usize = term_freq.iter().map(|(_, tf)| *tf as usize).sum();
+    let path_term_freq = build_path_term_freq(project_root, file_path);
+    let path_doc_len: usize = path_term_freq.iter().map(|(_, tf)| *tf as usize).sum();
+    let category = structural_boost::classify_file(file_path);
 
     let id = reuse_id.unwrap_or_else(|| {
         let next = index.next_doc_id;
@@ -403,6 +425,9 @@ fn upsert_doc(
         signature,
         term_freq,
         doc_len,
+        path_term_freq,
+        path_doc_len,
+        category,
     };
 
     add_doc(index, record);
@@ -420,8 +445,16 @@ fn add_doc(index: &mut ProjectTextIndex, doc: TextDocRecord) {
             .or_default()
             .insert(doc_id, *tf);
     }
+    for (term, tf) in &doc.path_term_freq {
+        index
+            .path_postings
+            .entry(term.clone())
+            .or_default()
+            .insert(doc_id, *tf);
+    }
 
     index.total_doc_len += doc.doc_len;
+    index.total_path_doc_len += doc.path_doc_len;
     index.path_to_doc_id.insert(doc.file_path.clone(), doc_id);
     index.docs.insert(doc_id, doc);
 }
@@ -439,12 +472,21 @@ fn remove_doc_by_id(index: &mut ProjectTextIndex, doc_id: u32) {
 
     index.path_to_doc_id.remove(&old_doc.file_path);
     index.total_doc_len = index.total_doc_len.saturating_sub(old_doc.doc_len);
+    index.total_path_doc_len = index.total_path_doc_len.saturating_sub(old_doc.path_doc_len);
 
     for (term, _) in &old_doc.term_freq {
         if let Some(posting) = index.postings.get_mut(term) {
             posting.remove(&doc_id);
             if posting.is_empty() {
                 index.postings.remove(term);
+            }
+        }
+    }
+    for (term, _) in &old_doc.path_term_freq {
+        if let Some(posting) = index.path_postings.get_mut(term) {
+            posting.remove(&doc_id);
+            if posting.is_empty() {
+                index.path_postings.remove(term);
             }
         }
     }
@@ -467,12 +509,42 @@ fn score_candidates(
     } else {
         index.total_doc_len.max(1) as f64 / num_docs as f64
     };
+    let avg_path_dl = if num_docs == 0 {
+        1.0
+    } else {
+        index.total_path_doc_len.max(1) as f64 / num_docs as f64
+    };
 
-    let mut score_by_doc: HashMap<u32, f64> = HashMap::new();
+    let mut content_score_by_doc: HashMap<u32, f64> = HashMap::new();
+    let mut path_score_by_doc: HashMap<u32, f64> = HashMap::new();
     let mut terms_by_doc: HashMap<u32, Vec<String>> = HashMap::new();
 
     for term in &query_terms {
         let Some(posting) = index.postings.get(term) else {
+            // Keep going so path postings can still contribute.
+            if let Some(path_posting) = index.path_postings.get(term) {
+                let df = path_posting.len();
+                let idf = compute_idf(num_docs, df);
+                for (doc_id, tf_u32) in path_posting {
+                    let Some(doc) = index.docs.get(doc_id) else {
+                        continue;
+                    };
+                    if !matches_filter(&doc.file_path, &doc.language, filter) {
+                        continue;
+                    }
+
+                    let tf = *tf_u32 as f64;
+                    let doc_len = doc.path_doc_len.max(1) as f64;
+                    let tf_norm = (tf * (BM25_K1 + 1.0))
+                        / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * (doc_len / avg_path_dl)));
+
+                    *path_score_by_doc.entry(*doc_id).or_insert(0.0) += idf * tf_norm;
+                    terms_by_doc
+                        .entry(*doc_id)
+                        .or_default()
+                        .push(term.clone());
+                }
+            }
             continue;
         };
 
@@ -492,15 +564,53 @@ fn score_candidates(
             let tf_norm = (tf * (BM25_K1 + 1.0))
                 / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * (doc_len / avgdl)));
 
-            *score_by_doc.entry(*doc_id).or_insert(0.0) += idf * tf_norm;
+            *content_score_by_doc.entry(*doc_id).or_insert(0.0) += idf * tf_norm;
             terms_by_doc
                 .entry(*doc_id)
                 .or_default()
                 .push(term.clone());
         }
+
+        if let Some(path_posting) = index.path_postings.get(term) {
+            let df = path_posting.len();
+            let idf = compute_idf(num_docs, df);
+
+            for (doc_id, tf_u32) in path_posting {
+                let Some(doc) = index.docs.get(doc_id) else {
+                    continue;
+                };
+                if !matches_filter(&doc.file_path, &doc.language, filter) {
+                    continue;
+                }
+
+                let tf = *tf_u32 as f64;
+                let doc_len = doc.path_doc_len.max(1) as f64;
+                let tf_norm = (tf * (BM25_K1 + 1.0))
+                    / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * (doc_len / avg_path_dl)));
+
+                *path_score_by_doc.entry(*doc_id).or_insert(0.0) += idf * tf_norm;
+                terms_by_doc
+                    .entry(*doc_id)
+                    .or_default()
+                    .push(term.clone());
+            }
+        }
     }
 
-    let mut scored: Vec<(u32, f64)> = score_by_doc.into_iter().filter(|(_, score)| *score > 0.0).collect();
+    let mut scored: Vec<(u32, f64)> = index
+        .docs
+        .iter()
+        .filter_map(|(doc_id, doc)| {
+            if !matches_filter(&doc.file_path, &doc.language, filter) {
+                return None;
+            }
+
+            let content_score = content_score_by_doc.get(doc_id).copied().unwrap_or(0.0);
+            let path_score = path_score_by_doc.get(doc_id).copied().unwrap_or(0.0);
+            let score = content_score + (PATH_BM25_WEIGHT * path_score);
+            (score > 0.0).then_some((*doc_id, score))
+        })
+        .collect();
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -519,6 +629,7 @@ fn score_candidates(
             language: doc.language.clone(),
             score,
             matched_terms,
+            category: doc.category,
         });
     }
 
@@ -594,6 +705,32 @@ fn config_fingerprint(specs: &[LanguageSpec], respect_gitignore: bool) -> u64 {
     hasher.finish()
 }
 
+fn build_path_term_freq(project_root: &Path, file_path: &str) -> Vec<(String, u32)> {
+    let path = Path::new(file_path);
+    let relative_path = path
+        .strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut freq: HashMap<String, u32> = HashMap::new();
+
+    for (term, tf) in tokenizer().tokenize_with_frequency(&relative_path) {
+        *freq.entry(term).or_insert(0) += tf;
+    }
+
+    let file_stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    for (term, tf) in tokenizer().tokenize_with_frequency(file_stem) {
+        *freq.entry(term).or_insert(0) += tf.saturating_mul(PATH_BASENAME_TERM_BOOST);
+    }
+
+    let mut out: Vec<(String, u32)> = freq.into_iter().collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 fn persistence_path(root: &Path) -> Result<PathBuf, String> {
     let dir = root.join(".quickcontext");
     fs::create_dir_all(&dir).map_err(|e| format!("failed to create text index dir: {e}"))?;
@@ -667,14 +804,23 @@ fn hydrate_index(persisted: PersistedTextIndex) -> ProjectTextIndex {
     let mut docs = HashMap::new();
     let mut path_to_doc_id = HashMap::new();
     let mut postings: HashMap<String, HashMap<u32, u32>> = HashMap::new();
+    let mut path_postings: HashMap<String, HashMap<u32, u32>> = HashMap::new();
     let mut total_doc_len = 0usize;
+    let mut total_path_doc_len = 0usize;
 
     for doc in persisted.docs {
         total_doc_len += doc.doc_len;
+        total_path_doc_len += doc.path_doc_len;
         path_to_doc_id.insert(doc.file_path.clone(), doc.id);
 
         for (term, tf) in &doc.term_freq {
             postings
+                .entry(term.clone())
+                .or_default()
+                .insert(doc.id, *tf);
+        }
+        for (term, tf) in &doc.path_term_freq {
+            path_postings
                 .entry(term.clone())
                 .or_default()
                 .insert(doc.id, *tf);
@@ -691,7 +837,9 @@ fn hydrate_index(persisted: PersistedTextIndex) -> ProjectTextIndex {
         docs,
         path_to_doc_id,
         postings,
+        path_postings,
         total_doc_len,
+        total_path_doc_len,
         next_doc_id: persisted.next_doc_id,
         last_refresh_check_ms: now_ms(),
     }

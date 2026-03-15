@@ -12,7 +12,7 @@ It currently has two main parts:
 The SDK now includes AI-facing retrieval helpers:
 
 - `QuickContext.retrieve_context_auto(...)`
-  Default AI entrypoint. It routes exact symbol questions to the Rust symbol index first, expands behavior-oriented symbol questions with same-file helper symbols from indexed Rust metadata plus targeted source hydration, falls back to semantic or bundle retrieval for broader natural-language questions, and accepts explicit `path=` scoping when the target repo is outside the current working directory.
+  Default AI entrypoint. It routes exact symbol questions to the Rust symbol index first, expands behavior-oriented symbol questions with same-file helper symbols from indexed Rust metadata plus targeted source hydration, falls back to semantic or bundle retrieval for broader natural-language questions, accepts explicit `path=` scoping when the target repo is outside the current working directory, and degrades to Rust text retrieval when an external repo has not been vector-indexed yet.
 - `QuickContext.warm_project(...)`
   Optional startup warmup for the long-lived Rust service. It preloads the persisted Rust symbol and text indices for a project so the first real query is cheaper.
 - `QuickContext.start_background_warm(...)`
@@ -99,6 +99,8 @@ The transport layer supports both Windows and Linux.
 - Linux transport: Unix socket from `QC_SOCKET_PATH`, then `$XDG_RUNTIME_DIR/quickcontext.sock`, then `/tmp/quickcontext-<user>.sock`
 
 The request protocol is the same on both platforms: 4-byte little-endian length prefix plus JSON payload.
+
+The Rust text-search path now persists file-category and path-field metadata alongside content terms, so lexical retrieval can use both content and file-path signals while downweighting low-priority generated/test-like files.
 
 ## Requirements
 

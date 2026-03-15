@@ -1368,6 +1368,66 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(payload["results"], ["semantic"])
         self.assertIsNone(payload["symbol_query"])
 
+    def test_retrieve_context_auto_falls_back_to_text_when_vector_index_is_missing(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            text_matches = [
+                type(
+                    "TextMatch",
+                    (),
+                    {
+                        "file_path": str(Path("features/acp-official/main/server/acp-server.js").resolve()),
+                        "language": "javascript",
+                        "snippet_line_start": 12,
+                        "snippet_line_end": 20,
+                        "snippet": "class ACPServer { async handleMessage(message) { ... } }",
+                        "matched_terms": ["acp", "server", "session", "terminal"],
+                        "score": 12.0,
+                    },
+                )(),
+            ]
+            with mock.patch.object(
+                qc,
+                "_should_use_bundle_for_query",
+                return_value=False,
+            ), mock.patch.object(
+                qc,
+                "_should_use_graph_related_for_query",
+                return_value=False,
+            ), mock.patch.object(
+                qc,
+                "_should_use_text_primary_for_query",
+                return_value=False,
+            ), mock.patch.object(
+                qc,
+                "text_search",
+                return_value=type("TextResult", (), {"matches": text_matches})(),
+            ) as text_search, mock.patch.object(
+                qc,
+                "semantic_search_auto",
+                side_effect=RuntimeError("404 Client Error: Not Found for url: http://localhost:6333/collections/missing/points/query/batch"),
+            ):
+                payload = qc.retrieve_context_auto(
+                    "How does the bundled ACP server manage JSON-RPC sessions and expose filesystem and terminal capabilities to agents?",
+                    project_name="missing",
+                    path=Path("C:/tmp/external-missing-index"),
+                    limit=1,
+                )
+        finally:
+            qc.close()
+
+        self.assertEqual(payload["mode"], "text")
+        self.assertEqual(payload["results"][0].file_path, str(Path("features/acp-official/main/server/acp-server.js").resolve()))
+        self.assertGreaterEqual(len(text_search.call_args_list), 1)
+
     def test_retrieve_context_auto_adds_lexical_related_files_for_search_mode(self) -> None:
         qc = QuickContext(
             EngineConfig(
