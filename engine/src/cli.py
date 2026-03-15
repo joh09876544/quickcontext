@@ -1,6 +1,9 @@
 import sys
 from dataclasses import replace
 from pathlib import Path
+import json
+import time
+from statistics import mean, median
 
 import click
 from rich.console import Console
@@ -12,6 +15,39 @@ from engine.src.project import detect_project_name
 
 
 console = Console(legacy_windows=False)
+
+
+def _normalize_benchmark_path(path: str) -> str:
+    return path.replace("\\\\?\\", "").replace("\\", "/").lower()
+
+
+def _relative_benchmark_path(path: str, root: Path) -> str:
+    candidate = Path(path.replace("\\\\?\\", ""))
+    try:
+        return str(candidate.resolve().relative_to(root)).replace("\\", "/")
+    except Exception:
+        return str(candidate).replace("\\", "/")
+
+
+def _benchmark_match_rank(paths: list[str], expected_paths: list[str]) -> int | None:
+    normalized_expected = tuple(fragment.lower() for fragment in expected_paths)
+    for idx, path in enumerate(paths, 1):
+        normalized_path = _normalize_benchmark_path(path)
+        if any(fragment in normalized_path for fragment in normalized_expected):
+            return idx
+    return None
+
+
+def _benchmark_coverage(paths: list[str], expected_paths: list[str], limit: int) -> float:
+    if not expected_paths:
+        return 0.0
+
+    matched = 0
+    for fragment in expected_paths:
+        fragment_lower = fragment.lower()
+        if any(fragment_lower in _normalize_benchmark_path(path) for path in paths[:limit]):
+            matched += 1
+    return matched / len(expected_paths)
 
 
 def _load_config(config_path: str | None) -> EngineConfig:
@@ -1290,6 +1326,149 @@ def warm(ctx: click.Context, path: Path, no_gitignore: bool) -> None:
     console.print(f"[cyan]Respect gitignore:[/cyan] {payload['respect_gitignore']}")
     console.print(f"[cyan]Symbol count:[/cyan] {payload['symbol_count']}")
     console.print(f"[cyan]Text doc count:[/cyan] {payload['text_doc_count']}")
+
+
+@cli.command("benchmark-context")
+@click.option("--project", default=None, help="Indexed project name. Auto-detected from --path if omitted.")
+@click.option("--path", "target_path", required=True, type=click.Path(exists=True, path_type=Path), help="Target repo root to benchmark.")
+@click.option("--cases-file", required=True, type=click.Path(exists=True, path_type=Path), help="JSON file containing benchmark cases.")
+@click.option(
+    "--strategy",
+    type=click.Choice(["semantic-auto", "context-auto"], case_sensitive=False),
+    default="context-auto",
+    show_default=True,
+    help="Retrieval strategy to benchmark.",
+)
+@click.option("--limit", default=3, type=int, show_default=True, help="Primary result limit.")
+@click.option("--related-seed-files", default=1, type=int, show_default=True, help="Seed files for related context expansion.")
+@click.option("--related-file-limit", default=8, type=int, show_default=True, help="Related files to return.")
+@click.option("--show-top", default=3, type=int, show_default=True, help="Show the top N result paths per query.")
+@click.pass_context
+def benchmark_context(
+    ctx: click.Context,
+    project: str | None,
+    target_path: Path,
+    cases_file: Path,
+    strategy: str,
+    limit: int,
+    related_seed_files: int,
+    related_file_limit: int,
+    show_top: int,
+) -> None:
+    """
+    Benchmark AI-facing retrieval on any target repo root using a JSON case file.
+    """
+    config = _optimize_search_config(ctx.obj["config"])
+    target_root = target_path.resolve()
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    project_name = project if project else detect_project_name(target_root, manual_override=None)
+
+    latencies: list[float] = []
+    hit_ranks: list[int | None] = []
+    anchor_coverages: list[float] = []
+    context_coverages: list[float] = []
+    mode_counts: dict[str, int] = {}
+    case_rows: list[dict] = []
+
+    with QuickContext(config) as qc:
+        warmup_query = str(cases[0]["query"]) if cases else "warm project"
+        try:
+            qc.warm_project(path=target_root)
+        except Exception:
+            pass
+        try:
+            qc.retrieve_context_auto(
+                query=warmup_query,
+                project_name=project_name,
+                path=target_root,
+                limit=1,
+            )
+        except Exception:
+            pass
+
+        for case in cases:
+            query = str(case["query"])
+            expected_paths = [str(path) for path in case["expected_paths"]]
+            started = time.perf_counter()
+            if strategy == "semantic-auto":
+                payload = qc.semantic_search_auto(
+                    query=query,
+                    project_name=project_name,
+                    path=target_root,
+                    limit=limit,
+                    related_seed_files=related_seed_files,
+                    related_file_limit=related_file_limit,
+                )
+            else:
+                payload = qc.retrieve_context_auto(
+                    query=query,
+                    project_name=project_name,
+                    path=target_root,
+                    limit=limit,
+                    related_seed_files=related_seed_files,
+                    related_file_limit=related_file_limit,
+                )
+            latency_ms = (time.perf_counter() - started) * 1000
+            latencies.append(latency_ms)
+
+            result_paths = [_relative_benchmark_path(item.file_path, target_root) for item in payload["results"]]
+            bundle_paths = result_paths + [
+                _relative_benchmark_path(item["file_path"], target_root)
+                for item in payload["related_files"]
+            ]
+            hit_rank = _benchmark_match_rank(result_paths, expected_paths)
+            hit_ranks.append(hit_rank)
+            anchor_coverages.append(_benchmark_coverage(result_paths, expected_paths, limit=max(limit, 1)))
+            context_coverages.append(
+                _benchmark_coverage(
+                    bundle_paths,
+                    expected_paths,
+                    limit=max(limit + related_file_limit, 1),
+                )
+            )
+
+            mode = str(payload.get("mode", "unknown"))
+            mode_counts[mode] = mode_counts.get(mode, 0) + 1
+            case_rows.append(
+                {
+                    "query": query,
+                    "mode": mode,
+                    "latency_ms": latency_ms,
+                    "hit_rank": hit_rank,
+                    "result_paths": result_paths,
+                }
+            )
+
+    hit1 = sum(1 for rank in hit_ranks if rank == 1)
+    hit3 = sum(1 for rank in hit_ranks if rank is not None and rank <= 3)
+    mrr = sum(0.0 if rank is None else 1.0 / rank for rank in hit_ranks) / len(hit_ranks)
+
+    console.print("\n[bold]Summary[/bold]")
+    console.print(f"  Cases: {len(hit_ranks)}")
+    console.print(f"  Strategy: {strategy}")
+    console.print(f"  Project: {project_name}")
+    console.print(f"  Path: {target_root}")
+    console.print(f"  Hit@1: {hit1}/{len(hit_ranks)}")
+    console.print(f"  Hit@3: {hit3}/{len(hit_ranks)}")
+    console.print(f"  MRR: {mrr:.4f}")
+    console.print(f"  Mean anchor top-{limit} coverage: {sum(anchor_coverages) / len(anchor_coverages):.4f}")
+    console.print(f"  Mean context coverage: {sum(context_coverages) / len(context_coverages):.4f}")
+    console.print(f"  Mean latency: {mean(latencies):.2f} ms")
+    console.print(f"  Median latency: {median(latencies):.2f} ms")
+    console.print("  Modes:")
+    for mode, count in sorted(mode_counts.items()):
+        console.print(f"    {mode}: {count}")
+    console.print()
+
+    for row in case_rows:
+        rank_text = str(row["hit_rank"]) if row["hit_rank"] is not None else "miss"
+        console.print(row["query"])
+        console.print(f"  mode: {row['mode']}")
+        console.print(f"  hit_rank: {rank_text}")
+        console.print(f"  latency_ms: {row['latency_ms']:.2f}")
+        for idx, path in enumerate(row["result_paths"][: max(show_top, 1)], 1):
+            console.print(f"  {idx}. {path}")
+        console.print()
 
 
 @cli.command()

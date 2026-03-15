@@ -137,6 +137,7 @@ Common SDK and engine flow:
 - `python -m engine status`
 - `python -m engine init`
 - `python -m engine warm .`
+- `python -m engine benchmark-context --project <name> --path <target-root> --cases-file <cases.json>`
 - `python -m engine index <path> [--project <name>]`
 - `python -m engine search "<query>" [--project <name>]`
 - `python -m engine refresh <files...>`

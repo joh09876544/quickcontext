@@ -1,0 +1,26 @@
+[
+  {
+    "query": "How does the target system initialize its main service and register request handlers?",
+    "expected_paths": [
+      "src/main",
+      "service",
+      "handler"
+    ]
+  },
+  {
+    "query": "How are workspace changes detected, processed, and persisted?",
+    "expected_paths": [
+      "workspace",
+      "change",
+      "storage"
+    ]
+  },
+  {
+    "query": "How does the browser or UI action layer call into the lower-level execution service?",
+    "expected_paths": [
+      "browser",
+      "action",
+      "service"
+    ]
+  }
+]
