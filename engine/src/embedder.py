@@ -320,20 +320,41 @@ class DualEmbedder:
         code_texts = [chunk.source for chunk in chunks]
         desc_texts = [desc_map[chunk.chunk_id].description for chunk in chunks]
 
-        code_vectors, code_cost, code_stats = self._embed_code(
-            code_texts,
-            concurrency_override=concurrency_override,
-            max_retries_override=max_retries_override,
-            batch_size_override=batch_size_override,
-            adaptive_batching_override=adaptive_batching_override,
-        )
-        desc_vectors, desc_cost, desc_stats = self._embed_descriptions(
-            desc_texts,
-            concurrency_override=concurrency_override,
-            max_retries_override=max_retries_override,
-            batch_size_override=batch_size_override,
-            adaptive_batching_override=adaptive_batching_override,
-        )
+        if self._code_provider == "litellm" or self._desc_provider == "litellm":
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                code_future = executor.submit(
+                    self._embed_code,
+                    code_texts,
+                    concurrency_override=concurrency_override,
+                    max_retries_override=max_retries_override,
+                    batch_size_override=batch_size_override,
+                    adaptive_batching_override=adaptive_batching_override,
+                )
+                desc_future = executor.submit(
+                    self._embed_descriptions,
+                    desc_texts,
+                    concurrency_override=concurrency_override,
+                    max_retries_override=max_retries_override,
+                    batch_size_override=batch_size_override,
+                    adaptive_batching_override=adaptive_batching_override,
+                )
+                code_vectors, code_cost, code_stats = code_future.result()
+                desc_vectors, desc_cost, desc_stats = desc_future.result()
+        else:
+            code_vectors, code_cost, code_stats = self._embed_code(
+                code_texts,
+                concurrency_override=concurrency_override,
+                max_retries_override=max_retries_override,
+                batch_size_override=batch_size_override,
+                adaptive_batching_override=adaptive_batching_override,
+            )
+            desc_vectors, desc_cost, desc_stats = self._embed_descriptions(
+                desc_texts,
+                concurrency_override=concurrency_override,
+                max_retries_override=max_retries_override,
+                batch_size_override=batch_size_override,
+                adaptive_batching_override=adaptive_batching_override,
+            )
 
         self._last_run_stats = EmbeddingRunStats(code=code_stats, description=desc_stats)
 

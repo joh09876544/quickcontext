@@ -17,6 +17,7 @@ from engine.src.collection import CollectionManager
 from engine.src.config import CollectionVectorConfig, EngineConfig, QdrantConfig
 from engine.src.dedup import deduplicate_chunks
 from engine.src.describer import build_fallback_description
+from engine.src.embedder import DualEmbedder, EmbeddingProviderStats
 from engine.src.filecache import FileSignatureCache
 from engine.src.index_resume import ResumeFile, ResumeState, build_settings_fingerprint, clear_state, load_state, save_state
 from engine.src.cli import _optimize_search_config
@@ -342,6 +343,55 @@ class RegressionTests(unittest.TestCase):
         self.assertTrue(all(chunk.symbol_kind == "file_artifact" for chunk in chunks))
         self.assertTrue(filtered)
         self.assertEqual(stats.skipped_minified, 0)
+
+    def test_dual_embedder_parallelizes_remote_code_and_description_embeddings(self) -> None:
+        chunk = CodeChunk(
+            chunk_id="chunk-1",
+            source="print('x')",
+            language="python",
+            file_path="sample.py",
+            symbol_name="sample",
+            symbol_kind="function",
+            line_start=1,
+            line_end=1,
+            byte_start=0,
+            byte_end=10,
+            signature="sample()",
+            docstring=None,
+            parent=None,
+            visibility=None,
+            role=None,
+            file_hash="hash",
+        )
+        description = build_fallback_description(chunk)
+        embedder = DualEmbedder(
+            code_provider="litellm",
+            code_model="x",
+            code_dimension=3,
+            desc_provider="litellm",
+            desc_model="x",
+            desc_dimension=3,
+        )
+
+        def _slow_embed(*_args, **_kwargs):
+            time.sleep(0.2)
+            return (
+                [[0.1, 0.2, 0.3]],
+                0.0,
+                EmbeddingProviderStats(1, 0, 0, 1, 0.2),
+            )
+
+        with mock.patch.object(embedder, "_embed_code", side_effect=_slow_embed), mock.patch.object(
+            embedder,
+            "_embed_descriptions",
+            side_effect=_slow_embed,
+        ):
+            started = time.perf_counter()
+            embedded, _cost = embedder.embed_batch([chunk], [description])
+            elapsed = time.perf_counter() - started
+
+        self.assertEqual(len(embedded), 1)
+        self.assertLess(elapsed, 0.35)
 
     def test_file_signature_cache_uses_external_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -124,4 +124,4 @@ def should_downgrade_artifact_profile(profile: ArtifactIndexProfile) -> bool:
     if profile.file_size >= 512 * 1024:
         return True
 
-    return profile.bundle_like_name and profile.file_size >= 256 * 1024
+    return profile.bundle_like_name and profile.file_size >= 192 * 1024
