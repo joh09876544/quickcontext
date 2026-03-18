@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 import re
 import time
@@ -24,6 +24,7 @@ from engine.src.dedup import (
     expand_embeddings,
 )
 from engine.src.filecache import FileSignatureCache
+from engine.src.operation_status import GLOBAL_OPERATION_REGISTRY, OperationProgressReporter, snapshot_to_dict
 
 if TYPE_CHECKING:
     from engine.src.collection import CollectionManager
@@ -81,7 +82,7 @@ from engine.src.packer import (
     truncate_source,
 )
 from engine.src.project import detect_project_name
-from engine.src.sdk_models import ProjectCollectionInfo, ProjectFolderInfo, ProjectInfo
+from engine.src.sdk_models import IndexOperationSnapshot, ProjectCollectionInfo, ProjectFolderInfo, ProjectInfo
 from engine.src.search_modes import BIAS_NAMES, SearchBias, apply_bias, get_bias
 
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -3981,6 +3982,7 @@ class QuickContext:
         embedding_max_retries: Optional[int] = None,
         embedding_batch_size: Optional[int] = None,
         embedding_adaptive_batching: Optional[bool] = None,
+        _progress_reporter: OperationProgressReporter | None = None,
     ) -> "IndexStats":
         """
         Index a directory: extract symbols, chunk, optionally describe, embed, and upsert to Qdrant.
@@ -4007,6 +4009,8 @@ class QuickContext:
         from engine.src.indexer import IndexStats
 
         started_at = time.time()
+        if _progress_reporter is not None:
+            _progress_reporter.start("scan", "Scanning supported files")
         self._ensure_indexing_backends_ready(
             operation_name="index",
             generate_descriptions=generate_descriptions,
@@ -4030,6 +4034,11 @@ class QuickContext:
         scan_started = time.time()
         scan_entries = self.parser_service.scan_files(directory)
         scan_stage_duration_seconds = time.time() - scan_started
+        if _progress_reporter is not None:
+            _progress_reporter.update(
+                files_discovered=len(scan_entries),
+                message=f"Scanned {len(scan_entries)} supported files",
+            )
 
         indexer = self._get_indexer(detected_project)
         candidate_entries = []
@@ -4047,9 +4056,16 @@ class QuickContext:
                 unchanged_files += 1
                 continue
             candidate_entries.append(entry)
+        if _progress_reporter is not None:
+            _progress_reporter.update(
+                files_unchanged=unchanged_files,
+                message=f"Identified {len(candidate_entries)} candidate files",
+            )
 
         indexed_hashes = indexer.get_file_hashes([entry.file_path for entry in candidate_entries])
         changed_results: list[ExtractionResult] = []
+        if _progress_reporter is not None:
+            _progress_reporter.set_stage("artifact_profile", "Profiling artifact candidates")
         artifact_profile_started = time.time()
         artifact_profiles = self._collect_artifact_profiles(
             candidate_entries,
@@ -4107,6 +4123,8 @@ class QuickContext:
             )
 
         candidate_paths = {entry.file_path for entry in extraction_entries}
+        if _progress_reporter is not None:
+            _progress_reporter.set_stage("extract", "Extracting symbols")
         extract_started = time.time()
         if extraction_entries and (
             len(extraction_entries) == len(scan_entries)
@@ -4144,6 +4162,16 @@ class QuickContext:
                 unchanged_files += 1
                 continue
             changed_results.append(result)
+        if _progress_reporter is not None:
+            _progress_reporter.update(
+                files_unchanged=unchanged_files,
+                files_planned=len(changed_results),
+                files_remaining=len(changed_results),
+                files_analyzed=len(changed_results),
+                artifact_downgraded_files=artifact_downgraded_files,
+                symbols_extracted=sum(len(result.symbols) for result in changed_results),
+                message=f"Prepared {len(changed_results)} changed files for indexing",
+            )
 
         if show_progress and unchanged_files > 0:
             print(f"Skipping {unchanged_files} files (already indexed with same hash)")
@@ -4151,7 +4179,7 @@ class QuickContext:
         if not changed_results:
             if show_progress:
                 print("No file changes detected; keeping active collection unchanged")
-            return IndexStats(
+            empty_stats = IndexStats(
                 total_chunks=0,
                 upserted_points=0,
                 failed_points=0,
@@ -4161,6 +4189,9 @@ class QuickContext:
                 embedding_cost_usd=0.0,
                 descriptions_enabled=generate_descriptions,
             )
+            if _progress_reporter is not None:
+                _progress_reporter.complete(asdict(empty_stats), message="No file changes detected")
+            return empty_stats
 
         if incremental_resume:
             if show_progress:
@@ -4196,6 +4227,7 @@ class QuickContext:
                     embedding_max_retries=embedding_max_retries,
                     embedding_batch_size=embedding_batch_size,
                     embedding_adaptive_batching=embedding_adaptive_batching,
+                    _progress_reporter=_progress_reporter,
                 )
                 total_stats = replace(
                     total_stats,
@@ -4239,9 +4271,12 @@ class QuickContext:
         if show_progress:
             print("Building chunks...")
 
+        if _progress_reporter is not None:
+            _progress_reporter.set_stage("chunk_build", "Building chunks")
         chunk_build_started = time.time()
         chunks = self.chunker.build_chunks(changed_results)
         chunk_build_stage_duration_seconds = time.time() - chunk_build_started
+        chunk_count_before_filter = len(chunks)
 
         if fast:
             generate_descriptions = False
@@ -4273,6 +4308,12 @@ class QuickContext:
             if show_progress:
                 print(f"Total chunk cap applied: kept {len(chunks)}/{len(ranked)}")
         filter_stage_duration_seconds = time.time() - filter_started
+        if _progress_reporter is not None:
+            _progress_reporter.update(
+                chunks_built=chunk_count_before_filter,
+                chunks_kept=len(chunks),
+                message=f"Built {chunk_count_before_filter} chunks and kept {len(chunks)}",
+            )
 
         if show_progress:
             print(
@@ -4422,6 +4463,13 @@ class QuickContext:
         completed_paths, pending_paths = self._resume_pending_files(resume_files, indexed_state)
         if show_progress and completed_paths:
             print(f"Recovered {len(completed_paths)} already indexed files from {shadow_name}")
+        if _progress_reporter is not None:
+            _progress_reporter.update(
+                files_planned=len(resume_files),
+                files_indexed=len(completed_paths),
+                files_remaining=len(pending_paths),
+                message=f"Recovered {len(completed_paths)} files from shadow state",
+            )
 
         if not pending_paths:
             self._finalize_shadow_collection(collection, shadow_name, show_progress)
@@ -4432,7 +4480,7 @@ class QuickContext:
                     print("Recovered shadow collection and applied alias swap")
                 else:
                     print("Applied filtered deletions with no replacement chunks")
-            return self._zero_index_stats(
+            zero_stats = self._zero_index_stats(
                 started_at=started_at,
                 generate_descriptions=generate_descriptions,
                 skipped_small_chunks=filter_stats.skipped_small,
@@ -4440,13 +4488,25 @@ class QuickContext:
                 skipped_capped_chunks=filter_stats.skipped_per_file_cap,
                 files_capped=filter_stats.files_capped,
             )
+            if _progress_reporter is not None:
+                _progress_reporter.update(files_remaining=0, files_indexed=len(resume_files))
+            return zero_stats
 
         pending_path_set = set(pending_paths)
         pending_chunks = [chunk for chunk in chunks if chunk.file_path in pending_path_set]
 
+        if _progress_reporter is not None:
+            _progress_reporter.set_stage("dedup", "Deduplicating chunks")
         dedup_started = time.time()
         dedup_result = deduplicate_chunks(pending_chunks)
         dedup_stage_duration_seconds = time.time() - dedup_started
+        if _progress_reporter is not None:
+            _progress_reporter.update(
+                duplicate_chunks=dedup_result.duplicate_count,
+                files_indexed=len(completed_paths),
+                files_remaining=len(pending_paths),
+                message=f"Deduplicated {dedup_result.total_chunks} chunks to {dedup_result.unique_count} unique chunks",
+            )
 
         if compress_for_embedding:
             for idx, chunk in enumerate(dedup_result.unique_chunks):
@@ -4465,8 +4525,19 @@ class QuickContext:
             if show_progress:
                 print(f"Generating descriptions for {dedup_result.unique_count} unique chunks...")
 
+            if _progress_reporter is not None:
+                _progress_reporter.set_stage("describe", "Generating descriptions")
             description_started = time.time()
-            unique_descriptions = self.describer.generate_batch(dedup_result.unique_chunks)
+            unique_descriptions = self.describer.generate_batch(
+                dedup_result.unique_chunks,
+                progress_callback=(
+                    (lambda completed, total: _progress_reporter.update(
+                        description_chunks_completed=completed,
+                        message=f"Generated descriptions for {completed}/{total} chunks",
+                    ))
+                    if _progress_reporter is not None else None
+                ),
+            )
             descriptions = expand_descriptions(unique_descriptions, dedup_result)
             llm_cost = sum(d.cost_usd for d in unique_descriptions)
             description_stage_duration_seconds = time.time() - description_started
@@ -4477,17 +4548,26 @@ class QuickContext:
         else:
             from engine.src.describer import build_fallback_descriptions
 
+            if _progress_reporter is not None:
+                _progress_reporter.set_stage("describe", "Building fallback descriptions")
             description_started = time.time()
             unique_descriptions = build_fallback_descriptions(dedup_result.unique_chunks)
             descriptions = expand_descriptions(unique_descriptions, dedup_result)
             llm_cost = 0.0
             description_stage_duration_seconds = time.time() - description_started
+            if _progress_reporter is not None:
+                _progress_reporter.update(
+                    description_chunks_completed=dedup_result.unique_count,
+                    message=f"Built fallback descriptions for {dedup_result.unique_count} chunks",
+                )
             if show_progress:
                 print("Skipping description generation (fast/no-descriptions mode)")
 
         if show_progress:
             print("Generating embeddings...")
 
+        if _progress_reporter is not None:
+            _progress_reporter.set_stage("embed", "Generating embeddings")
         unique_embedded, embedding_cost = self.embedder.embed_batch(
             dedup_result.unique_chunks,
             unique_descriptions,
@@ -4495,6 +4575,13 @@ class QuickContext:
             max_retries_override=embedding_max_retries,
             batch_size_override=embedding_batch_size,
             adaptive_batching_override=embedding_adaptive_batching,
+            progress_callback=(
+                (lambda completed, total: _progress_reporter.update(
+                    embedding_chunks_completed=completed,
+                    message=f"Embedded {completed}/{total} chunks",
+                ))
+                if _progress_reporter is not None else None
+            ),
         )
         embed_stats = self.embedder.last_run_stats
         embedded_chunks = expand_embeddings(unique_embedded, pending_chunks, descriptions, dedup_result)
@@ -4514,6 +4601,7 @@ class QuickContext:
         )
 
         batch_size = max(1, int(resume_batch_files))
+        processed_pending_files = 0
         for offset in range(0, len(pending_paths), batch_size):
             batch_paths = pending_paths[offset:offset + batch_size]
             batch_embedded = []
@@ -4524,8 +4612,34 @@ class QuickContext:
 
             if show_progress:
                 print(f"Upserting {len(batch_embedded)} chunks to {shadow_name} for {len(batch_paths)} files...")
-            batch_stats = shadow_indexer.upsert_chunks(batch_embedded)
+            if _progress_reporter is not None:
+                _progress_reporter.set_stage("upsert", "Upserting chunks")
+            points_before = total_upsert_stats.upserted_points
+            failed_before = total_upsert_stats.failed_points
+            batch_stats = shadow_indexer.upsert_chunks(
+                batch_embedded,
+                progress_callback=(
+                    (lambda completed, total, failed: _progress_reporter.update(
+                        points_upserted=points_before + completed,
+                        points_failed=failed_before + failed,
+                        message=f"Upserting {points_before + completed}/{points_before + total} points",
+                    ))
+                    if _progress_reporter is not None else None
+                ),
+            )
             total_upsert_stats = self._merge_index_stats(total_upsert_stats, batch_stats)
+            processed_pending_files += len(batch_paths)
+            if _progress_reporter is not None:
+                _progress_reporter.update(
+                    files_indexed=len(completed_paths) + processed_pending_files,
+                    files_remaining=max(0, len(pending_paths) - processed_pending_files),
+                    points_upserted=total_upsert_stats.upserted_points,
+                    points_failed=total_upsert_stats.failed_points,
+                    message=(
+                        f"Upserted {total_upsert_stats.upserted_points} points across "
+                        f"{len(completed_paths) + processed_pending_files}/{len(resume_files)} files"
+                    ),
+                )
 
         self._finalize_shadow_collection(collection, shadow_name, show_progress)
         clear_state(directory, detected_project)
@@ -4610,6 +4724,7 @@ class QuickContext:
         embedding_max_retries: Optional[int] = None,
         embedding_batch_size: Optional[int] = None,
         embedding_adaptive_batching: Optional[bool] = None,
+        _progress_reporter: OperationProgressReporter | None = None,
     ) -> "IndexStats":
         """
         Refresh specific files: re-extract, re-chunk, re-embed, and re-index.
@@ -4634,6 +4749,8 @@ class QuickContext:
         from engine.src.indexer import IndexStats
 
         started_at = time.time()
+        if _progress_reporter is not None:
+            _progress_reporter.start("prepare", "Preparing refresh inputs")
 
         resolved_paths = [str(Path(p).resolve()) for p in file_paths]
 
@@ -4650,6 +4767,12 @@ class QuickContext:
                 existing_paths.append(fp)
             else:
                 deleted_paths.append(fp)
+        if _progress_reporter is not None:
+            _progress_reporter.update(
+                files_discovered=len(resolved_paths),
+                files_deleted=len(deleted_paths),
+                message=f"Prepared {len(resolved_paths)} refresh targets",
+            )
 
         if show_progress:
             print(f"Refreshing files in project: {detected_project}")
@@ -4663,6 +4786,13 @@ class QuickContext:
                 mtime_skipped += 1
             else:
                 paths_to_extract.append(fp)
+        if _progress_reporter is not None:
+            _progress_reporter.update(
+                files_unchanged=mtime_skipped,
+                files_planned=len(paths_to_extract),
+                files_remaining=len(paths_to_extract),
+                message=f"Refreshing {len(paths_to_extract)} changed files",
+            )
 
         if show_progress and mtime_skipped > 0:
             print(f"Skipping {mtime_skipped} files (mtime+size unchanged)")
@@ -4677,7 +4807,7 @@ class QuickContext:
         if not paths_to_extract and not deleted_paths:
             if show_progress:
                 print("All files unchanged (mtime cache hit)")
-            return IndexStats(
+            empty_stats = IndexStats(
                 total_chunks=0,
                 upserted_points=0,
                 failed_points=0,
@@ -4687,12 +4817,15 @@ class QuickContext:
                 embedding_cost_usd=0.0,
                 descriptions_enabled=generate_descriptions,
             )
+            if _progress_reporter is not None:
+                _progress_reporter.complete(asdict(empty_stats), message="All files unchanged")
+            return empty_stats
 
         if not paths_to_extract:
             file_cache.save()
             if show_progress:
                 print("No files to refresh after filtering")
-            return IndexStats(
+            empty_stats = IndexStats(
                 total_chunks=0,
                 upserted_points=0,
                 failed_points=0,
@@ -4702,6 +4835,9 @@ class QuickContext:
                 embedding_cost_usd=0.0,
                 descriptions_enabled=generate_descriptions,
             )
+            if _progress_reporter is not None:
+                _progress_reporter.complete(asdict(empty_stats), message="Deleted missing files only")
+            return empty_stats
 
         self._ensure_indexing_backends_ready(
             operation_name="refresh",
@@ -4710,6 +4846,8 @@ class QuickContext:
 
         if show_progress:
             print(f"Analyzing changes in {len(paths_to_extract)} files...")
+        if _progress_reporter is not None:
+            _progress_reporter.set_stage("extract", "Analyzing changed files")
 
         if fast:
             generate_descriptions = False
@@ -4725,6 +4863,8 @@ class QuickContext:
         dedup_stage_duration_seconds = 0.0
         description_stage_duration_seconds = 0.0
         artifact_profiles_by_path: dict[str, ArtifactIndexProfile] = {}
+        if _progress_reporter is not None:
+            _progress_reporter.set_stage("artifact_profile", "Profiling artifact candidates")
         artifact_profile_started = time.time()
         if fast and skip_minified:
             for file_path in paths_to_extract:
@@ -4769,6 +4909,7 @@ class QuickContext:
         total_skipped_capped = 0
         total_files_capped = 0
         old_chunks_by_file = indexer.get_chunks_by_files(paths_to_extract)
+        analyzed_files = 0
 
         for file_path in paths_to_extract:
             old_chunks = old_chunks_by_file.get(file_path, [])
@@ -4818,6 +4959,15 @@ class QuickContext:
             total_skipped_minified += filter_stats.skipped_minified
             total_skipped_capped += filter_stats.skipped_per_file_cap
             total_files_capped += filter_stats.files_capped
+            analyzed_files += 1
+            if _progress_reporter is not None:
+                _progress_reporter.update(
+                    files_analyzed=analyzed_files,
+                    chunks_built=len(all_chunks_to_reindex) + total_unchanged,
+                    chunks_kept=len(all_chunks_to_reindex),
+                    artifact_downgraded_files=len(artifact_profiles_by_path),
+                    message=f"Analyzed {analyzed_files}/{len(paths_to_extract)} files",
+                )
 
             if show_progress:
                 print(
@@ -4856,7 +5006,7 @@ class QuickContext:
             file_cache.save()
             if show_progress:
                 print("No chunks to re-index (all unchanged)")
-            return IndexStats(
+            empty_stats = IndexStats(
                 total_chunks=0,
                 upserted_points=0,
                 failed_points=0,
@@ -4870,11 +5020,21 @@ class QuickContext:
                 files_capped=total_files_capped,
                 descriptions_enabled=generate_descriptions,
             )
+            if _progress_reporter is not None:
+                _progress_reporter.complete(asdict(empty_stats), message="No chunks to re-index")
+            return empty_stats
 
         from engine.src.dedup import deduplicate_chunks, expand_descriptions, expand_embeddings
+        if _progress_reporter is not None:
+            _progress_reporter.set_stage("dedup", "Deduplicating chunks")
         dedup_started = time.time()
         dedup_result = deduplicate_chunks(all_chunks_to_reindex)
         dedup_stage_duration_seconds = time.time() - dedup_started
+        if _progress_reporter is not None:
+            _progress_reporter.update(
+                duplicate_chunks=dedup_result.duplicate_count,
+                message=f"Deduplicated {dedup_result.total_chunks} chunks to {dedup_result.unique_count} unique chunks",
+            )
 
         if compress_for_embedding:
             for idx, chunk in enumerate(dedup_result.unique_chunks):
@@ -4893,8 +5053,19 @@ class QuickContext:
             if show_progress:
                 print(f"Generating descriptions for {dedup_result.unique_count} unique chunks...")
 
+            if _progress_reporter is not None:
+                _progress_reporter.set_stage("describe", "Generating descriptions")
             description_started = time.time()
-            unique_descriptions = self.describer.generate_batch(dedup_result.unique_chunks)
+            unique_descriptions = self.describer.generate_batch(
+                dedup_result.unique_chunks,
+                progress_callback=(
+                    (lambda completed, total: _progress_reporter.update(
+                        description_chunks_completed=completed,
+                        message=f"Generated descriptions for {completed}/{total} chunks",
+                    ))
+                    if _progress_reporter is not None else None
+                ),
+            )
             descriptions = expand_descriptions(unique_descriptions, dedup_result)
             llm_cost = sum(d.cost_usd for d in unique_descriptions)
             description_stage_duration_seconds = time.time() - description_started
@@ -4905,17 +5076,26 @@ class QuickContext:
         else:
             from engine.src.describer import build_fallback_descriptions
 
+            if _progress_reporter is not None:
+                _progress_reporter.set_stage("describe", "Building fallback descriptions")
             description_started = time.time()
             unique_descriptions = build_fallback_descriptions(dedup_result.unique_chunks)
             descriptions = expand_descriptions(unique_descriptions, dedup_result)
             llm_cost = 0.0
             description_stage_duration_seconds = time.time() - description_started
+            if _progress_reporter is not None:
+                _progress_reporter.update(
+                    description_chunks_completed=dedup_result.unique_count,
+                    message=f"Built fallback descriptions for {dedup_result.unique_count} chunks",
+                )
             if show_progress:
                 print("Skipping description generation (fast/no-descriptions mode)")
 
         if show_progress:
             print("Generating embeddings...")
 
+        if _progress_reporter is not None:
+            _progress_reporter.set_stage("embed", "Generating embeddings")
         unique_embedded, embedding_cost = self.embedder.embed_batch(
             dedup_result.unique_chunks,
             unique_descriptions,
@@ -4923,6 +5103,13 @@ class QuickContext:
             max_retries_override=embedding_max_retries,
             batch_size_override=embedding_batch_size,
             adaptive_batching_override=embedding_adaptive_batching,
+            progress_callback=(
+                (lambda completed, total: _progress_reporter.update(
+                    embedding_chunks_completed=completed,
+                    message=f"Embedded {completed}/{total} chunks",
+                ))
+                if _progress_reporter is not None else None
+            ),
         )
         embed_stats = self.embedder.last_run_stats
         embedded_chunks = expand_embeddings(
@@ -4932,7 +5119,27 @@ class QuickContext:
         if show_progress:
             print(f"Upserting {len(embedded_chunks)} chunks to Qdrant...")
 
-        indexer_stats = indexer.upsert_chunks(embedded_chunks)
+        if _progress_reporter is not None:
+            _progress_reporter.set_stage("upsert", "Upserting chunks")
+        indexer_stats = indexer.upsert_chunks(
+            embedded_chunks,
+            progress_callback=(
+                (lambda completed, total, failed: _progress_reporter.update(
+                    points_upserted=completed,
+                    points_failed=failed,
+                    message=f"Upserting {completed}/{total} points",
+                ))
+                if _progress_reporter is not None else None
+            ),
+        )
+        if _progress_reporter is not None:
+            _progress_reporter.update(
+                files_indexed=len(paths_to_extract),
+                files_remaining=0,
+                points_upserted=indexer_stats.upserted_points,
+                points_failed=indexer_stats.failed_points,
+                message=f"Upserted {indexer_stats.upserted_points} points",
+            )
 
         stats = IndexStats(
             total_chunks=indexer_stats.total_chunks,
@@ -5154,6 +5361,172 @@ class QuickContext:
             folders=folders,
         )
 
+    def start_index_directory(
+        self,
+        directory: str | Path,
+        force_refresh: bool = False,
+        project_name: Optional[str] = None,
+        fast: bool = False,
+        generate_descriptions: bool = True,
+        min_chunk_bytes: int = 120,
+        max_chunks_per_file: int = 400,
+        max_total_chunks: Optional[int] = None,
+        compress_for_embedding: Optional[str] = None,
+        incremental_resume: bool = False,
+        resume_batch_files: int = 200,
+        skip_minified: bool = True,
+        embedding_concurrency: Optional[int] = None,
+        embedding_max_retries: Optional[int] = None,
+        embedding_batch_size: Optional[int] = None,
+        embedding_adaptive_batching: Optional[bool] = None,
+    ) -> IndexOperationSnapshot:
+        """
+        Start a background index operation owned by the SDK and return a pollable snapshot.
+        """
+        target_directory = Path(directory).resolve()
+        resolved_project = detect_project_name(target_directory, manual_override=project_name)
+        snapshot, attached = GLOBAL_OPERATION_REGISTRY.start_or_attach(
+            kind="index",
+            path=str(target_directory),
+            project_name=resolved_project,
+        )
+        if attached:
+            return replace(snapshot, message="Already running")
+
+        def _runner() -> None:
+            worker = QuickContext(self._config)
+            reporter = OperationProgressReporter(GLOBAL_OPERATION_REGISTRY, snapshot.operation_id)
+            try:
+                stats = worker.index_directory(
+                    directory=target_directory,
+                    force_refresh=force_refresh,
+                    show_progress=False,
+                    project_name=resolved_project,
+                    fast=fast,
+                    generate_descriptions=generate_descriptions,
+                    min_chunk_bytes=min_chunk_bytes,
+                    max_chunks_per_file=max_chunks_per_file,
+                    max_total_chunks=max_total_chunks,
+                    compress_for_embedding=compress_for_embedding,
+                    incremental_resume=incremental_resume,
+                    resume_batch_files=resume_batch_files,
+                    skip_minified=skip_minified,
+                    embedding_concurrency=embedding_concurrency,
+                    embedding_max_retries=embedding_max_retries,
+                    embedding_batch_size=embedding_batch_size,
+                    embedding_adaptive_batching=embedding_adaptive_batching,
+                    _progress_reporter=reporter,
+                )
+                current = self.get_operation_status(snapshot.operation_id)
+                if current is not None and current.status not in {"completed", "failed"}:
+                    reporter.complete(asdict(stats), message="Index complete")
+            except Exception as exc:
+                reporter.fail(str(exc), stage="failed", message="Index failed")
+            finally:
+                worker.close()
+
+        Thread(target=_runner, name=f"qc-index-{snapshot.operation_id}", daemon=True).start()
+        return snapshot
+
+    def start_refresh_files(
+        self,
+        file_paths: list[str | Path],
+        project_name: Optional[str] = None,
+        fast: bool = False,
+        generate_descriptions: bool = True,
+        min_chunk_bytes: int = 120,
+        max_chunks_per_file: int = 400,
+        max_total_chunks: Optional[int] = None,
+        compress_for_embedding: Optional[str] = None,
+        skip_minified: bool = True,
+        embedding_concurrency: Optional[int] = None,
+        embedding_max_retries: Optional[int] = None,
+        embedding_batch_size: Optional[int] = None,
+        embedding_adaptive_batching: Optional[bool] = None,
+    ) -> IndexOperationSnapshot:
+        """
+        Start a background refresh operation owned by the SDK and return a pollable snapshot.
+        """
+        resolved_paths = [str(Path(item).resolve()) for item in file_paths]
+        if not resolved_paths:
+            raise ValueError("No file paths provided")
+        anchor = Path(resolved_paths[0]).parent
+        resolved_project = detect_project_name(anchor, manual_override=project_name)
+        operation_path = str(anchor)
+        snapshot, attached = GLOBAL_OPERATION_REGISTRY.start_or_attach(
+            kind="refresh",
+            path=operation_path,
+            project_name=resolved_project,
+        )
+        if attached:
+            return replace(snapshot, message="Already running")
+
+        def _runner() -> None:
+            worker = QuickContext(self._config)
+            reporter = OperationProgressReporter(GLOBAL_OPERATION_REGISTRY, snapshot.operation_id)
+            try:
+                stats = worker.refresh_files(
+                    file_paths=resolved_paths,
+                    show_progress=False,
+                    project_name=resolved_project,
+                    fast=fast,
+                    generate_descriptions=generate_descriptions,
+                    min_chunk_bytes=min_chunk_bytes,
+                    max_chunks_per_file=max_chunks_per_file,
+                    max_total_chunks=max_total_chunks,
+                    compress_for_embedding=compress_for_embedding,
+                    skip_minified=skip_minified,
+                    embedding_concurrency=embedding_concurrency,
+                    embedding_max_retries=embedding_max_retries,
+                    embedding_batch_size=embedding_batch_size,
+                    embedding_adaptive_batching=embedding_adaptive_batching,
+                    _progress_reporter=reporter,
+                )
+                current = self.get_operation_status(snapshot.operation_id)
+                if current is not None and current.status not in {"completed", "failed"}:
+                    reporter.complete(asdict(stats), message="Refresh complete")
+            except Exception as exc:
+                reporter.fail(str(exc), stage="failed", message="Refresh failed")
+            finally:
+                worker.close()
+
+        Thread(target=_runner, name=f"qc-refresh-{snapshot.operation_id}", daemon=True).start()
+        return snapshot
+
+    def get_operation_status(self, operation_id: str) -> IndexOperationSnapshot | None:
+        """
+        Return one operation snapshot by ID.
+        """
+        return GLOBAL_OPERATION_REGISTRY.get(operation_id)
+
+    def list_operation_statuses(
+        self,
+        active_only: bool = False,
+        limit: int = 20,
+    ) -> list[IndexOperationSnapshot]:
+        """
+        Return recent SDK-owned operation snapshots.
+        """
+        return GLOBAL_OPERATION_REGISTRY.list(active_only=active_only, limit=limit)
+
+    def get_operation_status_for_target(
+        self,
+        *,
+        kind: str,
+        path: str | Path,
+        project_name: Optional[str] = None,
+    ) -> list[IndexOperationSnapshot]:
+        """
+        Return the latest operation snapshot for a specific logical target.
+        """
+        target_path = Path(path).resolve()
+        resolved_project = detect_project_name(target_path, manual_override=project_name)
+        return GLOBAL_OPERATION_REGISTRY.get_for_target(
+            kind=kind,
+            path=str(target_path),
+            project_name=resolved_project,
+        )
+
     def status(self, verify_qdrant: bool = True) -> dict:
         """
         Get engine status: connection health, collection info, provider details.
@@ -5211,6 +5584,8 @@ class QuickContext:
                     result["collections"][project_name] = collection.info()
                 except Exception:
                     result["collections"][project_name] = {"error": "collection not found"}
+
+        result["operations"] = [snapshot_to_dict(item) for item in self.list_operation_statuses(active_only=True, limit=20)]
 
         return result
 

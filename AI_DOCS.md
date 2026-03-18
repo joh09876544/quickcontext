@@ -97,6 +97,9 @@ Useful SDK retrieval primitives:
 - `QuickContext.project_info(...)`: stable project discovery payload for wrappers; reports detected project name, cache state, parser connectivity, Qdrant availability, current collection metadata, and optional folder scopes
 - `QuickContext.list_projects(...)`: typed indexed-project discovery without importing internal collection helpers
 - `QuickContext.qdrant_available(...)`: explicit vector-backend health probe so wrappers can distinguish empty state from an unreachable Qdrant backend
+- `QuickContext.start_index_directory(...)`: starts SDK-owned background indexing and returns a pollable operation snapshot
+- `QuickContext.start_refresh_files(...)`: starts SDK-owned background refresh work with the same snapshot model
+- `QuickContext.get_operation_status(...)` / `QuickContext.list_operation_statuses(...)`: poll live operation snapshots with stage, files remaining, chunk counts, description progress, embedding progress, and Qdrant upsert progress
 - `QuickContext.warm_project(...)`: preload persisted Rust symbol and text indices for a project root before the first real query
 - `QuickContext.start_background_warm(...)`: schedule the same Rust warmup to run once the SDK session goes idle instead of blocking startup
 - `QuickContext.semantic_search(...)`: main semantic retrieval path; accepts explicit `path=` scoping for external repos when parser/text-first helpers still need the correct root

@@ -1,10 +1,13 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from engine.sdk import QuickContext
 from engine.src.config import EngineConfig, QdrantConfig
+from engine.src.indexer import IndexStats
+from engine.src.operation_status import GLOBAL_OPERATION_REGISTRY
 from engine.src.parsing import TextSearchMatch
 from engine.src.sdk_models import ProjectCollectionInfo
 
@@ -89,3 +92,51 @@ class SDKSurfaceTests(unittest.TestCase):
             }
         )
         self.assertEqual(match.file_path, "C:\\repo\\src\\main.py")
+
+    def test_start_index_directory_exposes_pollable_progress_snapshot(self) -> None:
+        qc = QuickContext(EngineConfig(qdrant=QdrantConfig()))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text("{}", encoding="utf-8")
+
+            def _fake_index(*args, **kwargs):
+                reporter = kwargs.get("_progress_reporter")
+                if reporter is not None:
+                    reporter.start("extract", "Extracting symbols")
+                    reporter.update(files_discovered=10, files_planned=4, files_remaining=4)
+                    reporter.set_stage("upsert", "Upserting chunks")
+                    reporter.update(
+                        files_indexed=4,
+                        files_remaining=0,
+                        chunks_built=12,
+                        chunks_kept=8,
+                        description_chunks_completed=8,
+                        embedding_chunks_completed=8,
+                        points_upserted=8,
+                    )
+                return IndexStats(
+                    total_chunks=8,
+                    upserted_points=8,
+                    failed_points=0,
+                    total_tokens=0,
+                    duration_seconds=0.01,
+                )
+
+            with mock.patch.object(QuickContext, "index_directory", side_effect=_fake_index):
+                snapshot = qc.start_index_directory(root, fast=True)
+                final = None
+                for _ in range(50):
+                    final = qc.get_operation_status(snapshot.operation_id)
+                    if final is not None and final.status == "completed":
+                        break
+                    time.sleep(0.02)
+
+            self.assertIsNotNone(final)
+            assert final is not None
+            self.assertEqual(final.status, "completed")
+            self.assertEqual(final.current_stage, "completed")
+            self.assertEqual(final.files_discovered, 10)
+            self.assertEqual(final.files_indexed, 4)
+            self.assertEqual(final.chunks_kept, 8)
+            self.assertEqual(final.points_upserted, 8)

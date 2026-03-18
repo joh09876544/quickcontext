@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -17,6 +16,7 @@ from pydantic import BaseModel, Field
 from engine.sdk import QuickContext
 from engine.src.config import EngineConfig
 from engine.src.project import detect_project_name
+from engine.src.sdk_models import IndexOperationSnapshot
 
 
 SERVER_INSTRUCTIONS = """
@@ -76,15 +76,34 @@ class IndexRunView(BaseModel):
     status: IndexStatus
     path: str
     project_name: str
-    reindex: bool
-    fast: bool
+    kind: str = "index"
+    reindex: bool = True
+    fast: bool = True
     attached_to_existing: bool = False
     duplicate_of: str | None = None
     message: str = ""
     error: str | None = None
     created_at: str
+    updated_at: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    current_stage: str | None = None
+    files_discovered: int = 0
+    files_unchanged: int = 0
+    files_deleted: int = 0
+    files_planned: int = 0
+    files_analyzed: int = 0
+    files_indexed: int = 0
+    files_remaining: int = 0
+    artifact_downgraded_files: int = 0
+    symbols_extracted: int = 0
+    chunks_built: int = 0
+    chunks_kept: int = 0
+    duplicate_chunks: int = 0
+    description_chunks_completed: int = 0
+    embedding_chunks_completed: int = 0
+    points_upserted: int = 0
+    points_failed: int = 0
     stats: IndexStatsView | None = None
 
 
@@ -226,6 +245,7 @@ class CapabilitiesResource(BaseModel):
             "Semantic retrieval requires an indexed project and working Qdrant plus embedding configuration.",
             "Text, grep, and symbol lookup routes work through the Rust service and do not require vector search.",
             "Repeated index calls for the same path/project attach to the existing active run instead of starting another index operation.",
+            "Index status is backed by SDK-owned operation snapshots, including stage, files remaining, chunk counts, embedding progress, and upsert progress.",
         ]
     )
 
@@ -236,133 +256,6 @@ class ProjectsResource(BaseModel):
 
 class IndexJobsResource(BaseModel):
     runs: list[IndexRunView]
-
-
-@dataclass
-class _IndexRunRecord:
-    run_id: str
-    key: str
-    path: str
-    project_name: str
-    reindex: bool
-    fast: bool
-    status: IndexStatus
-    created_at: str
-    started_at: str | None = None
-    finished_at: str | None = None
-    message: str = ""
-    error: str | None = None
-    stats: dict[str, Any] | None = None
-
-
-class _IndexRegistry:
-    def __init__(self) -> None:
-        self._lock = Lock()
-        self._runs: dict[str, _IndexRunRecord] = {}
-        self._active_by_key: dict[str, str] = {}
-        self._latest_by_key: dict[str, str] = {}
-        self._order: list[str] = []
-
-    def start_or_attach(
-        self,
-        *,
-        path: str,
-        project_name: str,
-        reindex: bool,
-        fast: bool,
-    ) -> tuple[_IndexRunRecord, bool]:
-        key = self._make_key(path=path, project_name=project_name)
-        with self._lock:
-            active_id = self._active_by_key.get(key)
-            if active_id:
-                return self._runs[active_id], True
-
-            run_id = uuid.uuid4().hex[:12]
-            record = _IndexRunRecord(
-                run_id=run_id,
-                key=key,
-                path=path,
-                project_name=project_name,
-                reindex=reindex,
-                fast=fast,
-                status="queued",
-                created_at=_now_iso(),
-                message="Index queued",
-            )
-            self._runs[run_id] = record
-            self._active_by_key[key] = run_id
-            self._latest_by_key[key] = run_id
-            self._order.append(run_id)
-            self._prune_locked()
-            return record, False
-
-    def mark_running(self, run_id: str, message: str) -> None:
-        with self._lock:
-            record = self._runs[run_id]
-            record.status = "running"
-            record.started_at = record.started_at or _now_iso()
-            record.message = message
-
-    def mark_completed(self, run_id: str, stats: dict[str, Any]) -> None:
-        with self._lock:
-            record = self._runs[run_id]
-            record.status = "completed"
-            record.message = "Index complete"
-            record.stats = stats
-            record.finished_at = _now_iso()
-            self._active_by_key.pop(record.key, None)
-
-    def mark_failed(self, run_id: str, error: str) -> None:
-        with self._lock:
-            record = self._runs[run_id]
-            record.status = "failed"
-            record.error = error
-            record.message = "Index failed"
-            record.finished_at = _now_iso()
-            self._active_by_key.pop(record.key, None)
-
-    def get_by_run_id(self, run_id: str) -> _IndexRunRecord | None:
-        with self._lock:
-            return self._runs.get(run_id)
-
-    def get_for_target(self, *, path: str, project_name: str) -> list[_IndexRunRecord]:
-        key = self._make_key(path=path, project_name=project_name)
-        with self._lock:
-            latest_id = self._latest_by_key.get(key)
-            if latest_id is None:
-                return []
-            latest = self._runs.get(latest_id)
-            return [latest] if latest is not None else []
-
-    def list_recent(self, limit: int = 20) -> list[_IndexRunRecord]:
-        with self._lock:
-            run_ids = list(reversed(self._order[-limit:]))
-            return [self._runs[run_id] for run_id in run_ids if run_id in self._runs]
-
-    def list_active_for_target(self, *, path: str, project_name: str) -> list[_IndexRunRecord]:
-        key = self._make_key(path=path, project_name=project_name)
-        with self._lock:
-            run_id = self._active_by_key.get(key)
-            if run_id is None:
-                return []
-            record = self._runs.get(run_id)
-            return [record] if record is not None else []
-
-    def _prune_locked(self) -> None:
-        while len(self._order) > 128:
-            oldest_id = self._order.pop(0)
-            record = self._runs.get(oldest_id)
-            if record and record.status in {"queued", "running"}:
-                self._order.append(oldest_id)
-                break
-            self._runs.pop(oldest_id, None)
-
-    @staticmethod
-    def _make_key(*, path: str, project_name: str) -> str:
-        return f"{project_name}|{path.lower()}"
-
-
-_INDEX_REGISTRY = _IndexRegistry()
 _CONFIG_LOCK = Lock()
 _CONFIG_CACHE: tuple[str, EngineConfig] | None = None
 
@@ -481,22 +374,40 @@ def _index_stats_view(stats: dict[str, Any] | None) -> IndexStatsView | None:
     )
 
 
-def _index_run_view(record: _IndexRunRecord, *, attached: bool = False, duplicate_of: str | None = None) -> IndexRunView:
+def _operation_run_view(snapshot: IndexOperationSnapshot, *, attached: bool = False, duplicate_of: str | None = None) -> IndexRunView:
+    final_stats = snapshot.final_stats if isinstance(snapshot.final_stats, dict) else None
     return IndexRunView(
-        run_id=record.run_id,
-        status=record.status,
-        path=_display_path(record.path),
-        project_name=record.project_name,
-        reindex=record.reindex,
-        fast=record.fast,
+        run_id=snapshot.operation_id,
+        status=snapshot.status,
+        kind=snapshot.kind,
+        path=_display_path(snapshot.path),
+        project_name=snapshot.project_name,
         attached_to_existing=attached,
         duplicate_of=duplicate_of,
-        message=record.message,
-        error=record.error,
-        created_at=record.created_at,
-        started_at=record.started_at,
-        finished_at=record.finished_at,
-        stats=_index_stats_view(record.stats),
+        message=snapshot.message,
+        error=snapshot.error,
+        created_at=snapshot.created_at,
+        updated_at=snapshot.updated_at,
+        started_at=snapshot.started_at,
+        finished_at=snapshot.finished_at,
+        current_stage=snapshot.current_stage,
+        files_discovered=snapshot.files_discovered,
+        files_unchanged=snapshot.files_unchanged,
+        files_deleted=snapshot.files_deleted,
+        files_planned=snapshot.files_planned,
+        files_analyzed=snapshot.files_analyzed,
+        files_indexed=snapshot.files_indexed,
+        files_remaining=snapshot.files_remaining,
+        artifact_downgraded_files=snapshot.artifact_downgraded_files,
+        symbols_extracted=snapshot.symbols_extracted,
+        chunks_built=snapshot.chunks_built,
+        chunks_kept=snapshot.chunks_kept,
+        duplicate_chunks=snapshot.duplicate_chunks,
+        description_chunks_completed=snapshot.description_chunks_completed,
+        embedding_chunks_completed=snapshot.embedding_chunks_completed,
+        points_upserted=snapshot.points_upserted,
+        points_failed=snapshot.points_failed,
+        stats=_index_stats_view(final_stats),
     )
 
 
@@ -674,10 +585,14 @@ def _project_info_impl(*, path: str, project_name: str | None) -> ProjectInfoRes
             project_name=project_name,
             include_folders=True,
         )
+        operation_records = qc.list_operation_statuses(active_only=True, limit=64)
 
     active_runs = [
-        _index_run_view(record)
-        for record in _INDEX_REGISTRY.list_active_for_target(path=info.path, project_name=info.project_name)
+        _operation_run_view(record)
+        for record in operation_records
+        if record.kind == "index"
+        and Path(record.path).resolve() == Path(info.path).resolve()
+        and record.project_name == info.project_name
     ]
 
     return ProjectInfoResponse(
@@ -725,9 +640,8 @@ def _list_projects_impl() -> ListProjectsResponse:
         qdrant_available=qdrant_available,
         projects=catalog,
         active_index_runs=[
-            _index_run_view(record)
-            for record in _INDEX_REGISTRY.list_recent(limit=32)
-            if record.status in {"queued", "running"}
+            _operation_run_view(record)
+            for record in qc.list_operation_statuses(active_only=True, limit=32)
         ],
     )
 
@@ -810,51 +724,31 @@ def _symbol_lookup_impl(*, query: str, path: str, project_name: str | None, limi
 def _index_impl(*, path: str, project_name: str | None, reindex: bool, fast: bool) -> IndexRunView:
     scope = _normalize_scope_path(path)
     if not scope.exists():
-        failed = _IndexRunRecord(
-            run_id=uuid.uuid4().hex[:12],
-            key="missing",
+        failed = IndexOperationSnapshot(
+            operation_id=uuid.uuid4().hex[:12],
+            kind="index",
             path=str(scope),
             project_name=project_name or detect_project_name(scope.parent if scope.parent.exists() else Path.cwd(), manual_override=None),
-            reindex=reindex,
-            fast=fast,
             status="failed",
-            created_at=_now_iso(),
-            finished_at=_now_iso(),
-            error=f"Path does not exist: {_display_path(scope)}",
+            current_stage="failed",
             message="Index failed",
+            error=f"Path does not exist: {_display_path(scope)}",
+            created_at=_now_iso(),
+            updated_at=_now_iso(),
+            finished_at=_now_iso(),
         )
-        return _index_run_view(failed)
+        return _operation_run_view(failed)
 
-    anchor = _project_anchor(scope)
-    resolved_project = detect_project_name(anchor, manual_override=project_name)
-    record, attached = _INDEX_REGISTRY.start_or_attach(
-        path=str(anchor),
-        project_name=resolved_project,
-        reindex=reindex,
-        fast=fast,
-    )
-    if attached:
-        return _index_run_view(record, attached=True, duplicate_of=record.run_id)
-
-    _INDEX_REGISTRY.mark_running(record.run_id, "Indexing directory")
     config = _load_config()
-    try:
-        with QuickContext(config) as qc:
-            stats = qc.index_directory(
-                directory=anchor,
-                force_refresh=reindex,
-                show_progress=False,
-                project_name=resolved_project,
-                fast=fast,
-            )
-    except Exception as exc:
-        _INDEX_REGISTRY.mark_failed(record.run_id, _friendly_error_message(exc))
-        current = _INDEX_REGISTRY.get_by_run_id(record.run_id)
-        return _index_run_view(current or record)
-
-    _INDEX_REGISTRY.mark_completed(record.run_id, asdict(stats))
-    current = _INDEX_REGISTRY.get_by_run_id(record.run_id)
-    return _index_run_view(current or record)
+    with QuickContext(config) as qc:
+        snapshot = qc.start_index_directory(
+            directory=scope,
+            force_refresh=reindex,
+            project_name=project_name,
+            fast=fast,
+        )
+    attached = snapshot.message == "Already running"
+    return _operation_run_view(snapshot, attached=attached, duplicate_of=snapshot.operation_id if attached else None)
 
 
 mcp = FastMCP(
@@ -938,8 +832,6 @@ async def index(
     ctx: Context = CurrentContext(),
 ) -> IndexRunView:
     await ctx.info(f"Index request for {path}")
-    await ctx.report_progress(0, 2)
-    await ctx.report_progress(1, 2)
     result = await asyncio.to_thread(
         _index_impl,
         path=path,
@@ -947,7 +839,6 @@ async def index(
         reindex=reindex,
         fast=fast,
     )
-    await ctx.report_progress(2, 2)
     return result
 
 
@@ -974,23 +865,27 @@ async def index_status(
     ctx: Context = CurrentContext(),
 ) -> IndexStatusResponse:
     await ctx.info("Inspecting index run state")
+    config = _load_config()
 
     if run_id:
-        record = _INDEX_REGISTRY.get_by_run_id(run_id)
-        return IndexStatusResponse(runs=[] if record is None else [_index_run_view(record)])
+        with QuickContext(config) as qc:
+            record = qc.get_operation_status(run_id)
+        return IndexStatusResponse(runs=[] if record is None else [_operation_run_view(record)])
 
     if path:
         scope = _normalize_scope_path(path)
         anchor = _project_anchor(scope)
-        resolved_project = detect_project_name(anchor, manual_override=project_name)
-        return IndexStatusResponse(
-            runs=[
-                _index_run_view(record)
-                for record in _INDEX_REGISTRY.get_for_target(path=str(anchor), project_name=resolved_project)
-            ]
-        )
+        with QuickContext(config) as qc:
+            records = qc.get_operation_status_for_target(
+                kind="index",
+                path=anchor,
+                project_name=project_name,
+            )
+        return IndexStatusResponse(runs=[_operation_run_view(record) for record in records])
 
-    return IndexStatusResponse(runs=[_index_run_view(record) for record in _INDEX_REGISTRY.list_recent()])
+    with QuickContext(config) as qc:
+        records = qc.list_operation_statuses(active_only=False, limit=20)
+    return IndexStatusResponse(runs=[_operation_run_view(record) for record in records if record.kind == "index"])
 
 
 @mcp.tool(
@@ -1129,7 +1024,10 @@ def projects_resource() -> ProjectsResource:
     meta={"domain": "code-retrieval"},
 )
 def jobs_resource() -> IndexJobsResource:
-    return IndexJobsResource(runs=[_index_run_view(record) for record in _INDEX_REGISTRY.list_recent()])
+    config = _load_config()
+    with QuickContext(config) as qc:
+        runs = qc.list_operation_statuses(active_only=False, limit=20)
+    return IndexJobsResource(runs=[_operation_run_view(record) for record in runs if record.kind == "index"])
 
 
 @mcp.prompt(

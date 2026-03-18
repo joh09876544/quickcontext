@@ -222,7 +222,12 @@ class DescriptionGenerator:
         except Exception:
             return build_fallback_description(chunk)
 
-    def generate_batch(self, chunks: list[CodeChunk], batch_size: int = 10) -> list[ChunkDescription]:
+    def generate_batch(
+        self,
+        chunks: list[CodeChunk],
+        batch_size: int = 10,
+        progress_callback=None,
+    ) -> list[ChunkDescription]:
         """
         Generate descriptions for multiple chunks in batches using async concurrency.
 
@@ -233,9 +238,14 @@ class DescriptionGenerator:
         Returns:
             List of chunk descriptions
         """
-        return asyncio.run(self._generate_batch_async(chunks, batch_size))
+        return asyncio.run(self._generate_batch_async(chunks, batch_size, progress_callback=progress_callback))
 
-    async def _generate_batch_async(self, chunks: list[CodeChunk], batch_size: int) -> list[ChunkDescription]:
+    async def _generate_batch_async(
+        self,
+        chunks: list[CodeChunk],
+        batch_size: int,
+        progress_callback=None,
+    ) -> list[ChunkDescription]:
         """
         Async implementation of batch generation with concurrency control.
 
@@ -247,8 +257,27 @@ class DescriptionGenerator:
             List of chunk descriptions
         """
         semaphore = asyncio.Semaphore(batch_size)
-        tasks = [self._generate_async(chunk, semaphore) for chunk in chunks]
-        return await asyncio.gather(*tasks)
+        tasks = [
+            asyncio.create_task(self._generate_indexed_async(idx, chunk, semaphore))
+            for idx, chunk in enumerate(chunks)
+        ]
+        results: list[ChunkDescription | None] = [None] * len(chunks)
+        completed = 0
+        for task in asyncio.as_completed(tasks):
+            idx, description = await task
+            results[idx] = description
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed, len(chunks))
+        return [item for item in results if item is not None]
+
+    async def _generate_indexed_async(
+        self,
+        index: int,
+        chunk: CodeChunk,
+        semaphore: asyncio.Semaphore,
+    ) -> tuple[int, ChunkDescription]:
+        return index, await self._generate_async(chunk, semaphore)
 
     async def _generate_async(self, chunk: CodeChunk, semaphore: asyncio.Semaphore) -> ChunkDescription:
         """

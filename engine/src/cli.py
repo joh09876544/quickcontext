@@ -228,6 +228,30 @@ def status(ctx: click.Context) -> None:
         table.add_row("LLM", "disabled", "[dim]not configured[/dim]")
 
     console.print(table)
+    operations = qc.list_operation_statuses(active_only=True, limit=20)
+    if operations:
+        ops_table = Table(title="Active Operations")
+        ops_table.add_column("ID", style="cyan")
+        ops_table.add_column("Kind", style="white")
+        ops_table.add_column("Project", style="white")
+        ops_table.add_column("Stage", style="magenta")
+        ops_table.add_column("Files", style="green")
+        ops_table.add_column("Chunks", style="green")
+        ops_table.add_column("Points", style="green")
+        ops_table.add_column("Message", style="dim")
+        for item in operations:
+            ops_table.add_row(
+                item.operation_id,
+                item.kind,
+                item.project_name,
+                item.current_stage,
+                f"{item.files_indexed}/{max(item.files_planned, item.files_indexed)} rem={item.files_remaining}",
+                f"kept={item.chunks_kept} dedup={item.duplicate_chunks}",
+                f"{item.points_upserted}/{item.points_failed}",
+                item.message,
+            )
+        console.print()
+        console.print(ops_table)
     qc.close()
 
 

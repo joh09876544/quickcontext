@@ -118,7 +118,7 @@ class QdrantIndexer:
         self._wait = wait
         self._upsert_concurrency = max(1, int(upsert_concurrency))
 
-    def upsert_chunks(self, embedded_chunks: list[EmbeddedChunk]) -> IndexStats:
+    def upsert_chunks(self, embedded_chunks: list[EmbeddedChunk], progress_callback=None) -> IndexStats:
         """
         Upsert embedded chunks to Qdrant in batches.
 
@@ -156,8 +156,12 @@ class QdrantIndexer:
                         wait=self._wait,
                     )
                     upserted += len(points)
+                    if progress_callback is not None:
+                        progress_callback(upserted, total_chunks, failed)
                 except Exception as e:
                     failed += len(points)
+                    if progress_callback is not None:
+                        progress_callback(upserted, total_chunks, failed)
                     print(f"Batch upsert failed: {e}")
         else:
             with ThreadPoolExecutor(max_workers=min(self._upsert_concurrency, len(prepared_batches))) as executor:
@@ -170,8 +174,12 @@ class QdrantIndexer:
                     try:
                         future.result()
                         upserted += batch_size
+                        if progress_callback is not None:
+                            progress_callback(upserted, total_chunks, failed)
                     except Exception as e:
                         failed += batch_size
+                        if progress_callback is not None:
+                            progress_callback(upserted, total_chunks, failed)
                         print(f"Batch upsert failed: {e}")
 
         duration = time.time() - start_time

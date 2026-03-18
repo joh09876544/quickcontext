@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import random
+from threading import Lock
 import time
 from typing import Optional, TYPE_CHECKING
 
@@ -297,6 +298,7 @@ class DualEmbedder:
         max_retries_override: Optional[int] = None,
         batch_size_override: Optional[int] = None,
         adaptive_batching_override: Optional[bool] = None,
+        progress_callback=None,
     ) -> tuple[list[EmbeddedChunk], float]:
         """
         Generate dual embeddings for a batch of chunks.
@@ -319,6 +321,21 @@ class DualEmbedder:
 
         code_texts = [chunk.source for chunk in chunks]
         desc_texts = [desc_map[chunk.chunk_id].description for chunk in chunks]
+        progress_state = {"code": 0, "description": 0}
+        progress_lock = Lock() if self._code_provider == "litellm" or self._desc_provider == "litellm" else None
+
+        def _provider_progress(provider_name: str):
+            def _callback(completed: int, total: int) -> None:
+                if progress_callback is None:
+                    return
+                if progress_lock is not None:
+                    with progress_lock:
+                        progress_state[provider_name] = completed
+                        progress_callback(min(progress_state["code"], progress_state["description"]), total)
+                else:
+                    progress_state[provider_name] = completed
+                    progress_callback(min(progress_state["code"], progress_state["description"]), total)
+            return _callback
 
         if self._code_provider == "litellm" or self._desc_provider == "litellm":
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -329,6 +346,7 @@ class DualEmbedder:
                     max_retries_override=max_retries_override,
                     batch_size_override=batch_size_override,
                     adaptive_batching_override=adaptive_batching_override,
+                    progress_callback=_provider_progress("code"),
                 )
                 desc_future = executor.submit(
                     self._embed_descriptions,
@@ -337,6 +355,7 @@ class DualEmbedder:
                     max_retries_override=max_retries_override,
                     batch_size_override=batch_size_override,
                     adaptive_batching_override=adaptive_batching_override,
+                    progress_callback=_provider_progress("description"),
                 )
                 code_vectors, code_cost, code_stats = code_future.result()
                 desc_vectors, desc_cost, desc_stats = desc_future.result()
@@ -347,6 +366,7 @@ class DualEmbedder:
                 max_retries_override=max_retries_override,
                 batch_size_override=batch_size_override,
                 adaptive_batching_override=adaptive_batching_override,
+                progress_callback=_provider_progress("code"),
             )
             desc_vectors, desc_cost, desc_stats = self._embed_descriptions(
                 desc_texts,
@@ -354,6 +374,7 @@ class DualEmbedder:
                 max_retries_override=max_retries_override,
                 batch_size_override=batch_size_override,
                 adaptive_batching_override=adaptive_batching_override,
+                progress_callback=_provider_progress("description"),
             )
 
         self._last_run_stats = EmbeddingRunStats(code=code_stats, description=desc_stats)
@@ -380,6 +401,7 @@ class DualEmbedder:
         max_retries_override: Optional[int] = None,
         batch_size_override: Optional[int] = None,
         adaptive_batching_override: Optional[bool] = None,
+        progress_callback=None,
     ) -> tuple[list[list[float]], float, EmbeddingProviderStats]:
         """
         Generate code embeddings.
@@ -395,7 +417,7 @@ class DualEmbedder:
             Tuple of (code vectors, cost in USD, provider stats)
         """
         if self._code_provider == "fastembed":
-            vectors, stats = self._embed_fastembed(texts, self._code_embedder, self._code_batch_size)
+            vectors, stats = self._embed_fastembed(texts, self._code_embedder, self._code_batch_size, progress_callback=progress_callback)
             return vectors, 0.0, stats
         if self._code_provider == "litellm":
             return self._embed_litellm(
@@ -418,6 +440,7 @@ class DualEmbedder:
                 retry_base_delay_ms=self._code_retry_base_delay_ms,
                 retry_max_delay_ms=self._code_retry_max_delay_ms,
                 request_timeout_seconds=self._code_request_timeout_seconds,
+                progress_callback=progress_callback,
             )
         raise ValueError(f"Unknown code provider: {self._code_provider}")
 
@@ -428,6 +451,7 @@ class DualEmbedder:
         max_retries_override: Optional[int] = None,
         batch_size_override: Optional[int] = None,
         adaptive_batching_override: Optional[bool] = None,
+        progress_callback=None,
     ) -> tuple[list[list[float]], float, EmbeddingProviderStats]:
         """
         Generate description embeddings.
@@ -443,7 +467,7 @@ class DualEmbedder:
             Tuple of (description vectors, cost in USD, provider stats)
         """
         if self._desc_provider == "fastembed":
-            vectors, stats = self._embed_fastembed(texts, self._desc_embedder, self._desc_batch_size)
+            vectors, stats = self._embed_fastembed(texts, self._desc_embedder, self._desc_batch_size, progress_callback=progress_callback)
             return vectors, 0.0, stats
         if self._desc_provider == "litellm":
             return self._embed_litellm(
@@ -466,6 +490,7 @@ class DualEmbedder:
                 retry_base_delay_ms=self._desc_retry_base_delay_ms,
                 retry_max_delay_ms=self._desc_retry_max_delay_ms,
                 request_timeout_seconds=self._desc_request_timeout_seconds,
+                progress_callback=progress_callback,
             )
         raise ValueError(f"Unknown description provider: {self._desc_provider}")
 
@@ -474,6 +499,7 @@ class DualEmbedder:
         texts: list[str],
         embedder: "TextEmbedding",
         batch_size: int,
+        progress_callback=None,
     ) -> tuple[list[list[float]], EmbeddingProviderStats]:
         """
         Generate embeddings using fastembed.
@@ -493,6 +519,8 @@ class DualEmbedder:
         embeddings = list(embedder.embed(texts, batch_size=max(1, int(batch_size))))
         vectors = [emb.tolist() for emb in embeddings]
         duration = time.time() - started
+        if progress_callback is not None:
+            progress_callback(len(texts), len(texts))
 
         return vectors, EmbeddingProviderStats(
             request_count=1,
@@ -519,6 +547,7 @@ class DualEmbedder:
         retry_base_delay_ms: int,
         retry_max_delay_ms: int,
         request_timeout_seconds: Optional[float],
+        progress_callback=None,
     ) -> tuple[list[list[float]], float, EmbeddingProviderStats]:
         """
         Generate embeddings using parallel litellm calls with retry/backoff.
@@ -561,6 +590,7 @@ class DualEmbedder:
 
         request_count = 0
         next_start = 0
+        completed_inputs = 0
 
         with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
             while next_start < len(texts):
@@ -604,6 +634,9 @@ class DualEmbedder:
                     total_cost += batch_cost
                     total_retries += batch_retries
                     request_count += 1
+                    completed_inputs += len(batch_vectors)
+                    if progress_callback is not None:
+                        progress_callback(completed_inputs, len(texts))
                     wave_durations.append(batch_duration_seconds)
 
                     for idx, vector in enumerate(batch_vectors):

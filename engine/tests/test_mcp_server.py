@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 from fastmcp import Client
 
-from quickcontext_mcp.server import _INDEX_REGISTRY, _IndexRunRecord, _now_iso, mcp
+from engine.src.sdk_models import IndexOperationSnapshot
+from quickcontext_mcp.server import _now_iso, mcp
 
 
 def _run(coro):
@@ -14,18 +15,6 @@ def _run(coro):
 
 
 class MCPServerTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._runs_snapshot = dict(_INDEX_REGISTRY._runs)
-        self._active_snapshot = dict(_INDEX_REGISTRY._active_by_key)
-        self._latest_snapshot = dict(_INDEX_REGISTRY._latest_by_key)
-        self._order_snapshot = list(_INDEX_REGISTRY._order)
-
-    def tearDown(self) -> None:
-        _INDEX_REGISTRY._runs = self._runs_snapshot
-        _INDEX_REGISTRY._active_by_key = self._active_snapshot
-        _INDEX_REGISTRY._latest_by_key = self._latest_snapshot
-        _INDEX_REGISTRY._order = self._order_snapshot
-
     def test_list_tools_exposes_expected_surface(self) -> None:
         async def _test() -> None:
             async with Client(mcp) as client:
@@ -118,45 +107,43 @@ class MCPServerTests(unittest.TestCase):
         _run(_test())
 
     def test_index_status_reads_registry_records(self) -> None:
-        record = _IndexRunRecord(
-            run_id="run123",
-            key="demo|c:/repo",
+        record = IndexOperationSnapshot(
+            operation_id="run123",
+            kind="index",
             path="C:/repo",
             project_name="demo",
-            reindex=True,
-            fast=True,
             status="running",
+            current_stage="upsert",
+            updated_at=_now_iso(),
             created_at=_now_iso(),
             started_at=_now_iso(),
             message="Indexing directory",
         )
-        _INDEX_REGISTRY._runs = {"run123": record}
-        _INDEX_REGISTRY._active_by_key = {"demo|c:/repo": "run123"}
-        _INDEX_REGISTRY._latest_by_key = {"demo|c:/repo": "run123"}
-        _INDEX_REGISTRY._order = ["run123"]
 
         async def _test() -> None:
-            async with Client(mcp) as client:
-                result = await client.call_tool("index_status", {"run_id": "run123"})
+            with patch("quickcontext_mcp.server.QuickContext.get_operation_status", return_value=record):
+                async with Client(mcp) as client:
+                    result = await client.call_tool("index_status", {"run_id": "run123"})
             payload = result.data
             self.assertEqual(len(payload.runs), 1)
             self.assertEqual(payload.runs[0].status, "running")
             self.assertEqual(payload.runs[0].run_id, "run123")
+            self.assertEqual(payload.runs[0].current_stage, "upsert")
 
         _run(_test())
 
     def test_index_tool_attaches_to_existing_run(self) -> None:
-        existing = _IndexRunRecord(
-            run_id="run999",
-            key="repo|c:/repo",
+        existing = IndexOperationSnapshot(
+            operation_id="run999",
+            kind="index",
             path="C:/repo",
             project_name="repo",
-            reindex=True,
-            fast=True,
             status="running",
+            current_stage="extract",
+            updated_at=_now_iso(),
             created_at=_now_iso(),
             started_at=_now_iso(),
-            message="Indexing directory",
+            message="Already running",
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,7 +151,7 @@ class MCPServerTests(unittest.TestCase):
             (project_root / "package.json").write_text("{}", encoding="utf-8")
 
             async def _test() -> None:
-                with patch("quickcontext_mcp.server._INDEX_REGISTRY.start_or_attach", return_value=(existing, True)):
+                with patch("quickcontext_mcp.server.QuickContext.start_index_directory", return_value=existing):
                     async with Client(mcp) as client:
                         result = await client.call_tool("index", {"path": str(project_root)})
                 payload = result.data

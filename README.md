@@ -20,6 +20,12 @@ The SDK now includes AI-facing retrieval helpers:
   Returns typed project collection summaries so wrappers no longer need to import `CollectionManager` directly just to discover indexed projects.
 - `QuickContext.qdrant_available(...)`
   Explicit backend health probe for wrappers that need to distinguish “no indexed projects” from “vector store is currently unreachable”.
+- `QuickContext.start_index_directory(...)`
+  Starts SDK-owned background indexing and returns a pollable operation snapshot instead of forcing each wrapper to invent its own job registry.
+- `QuickContext.start_refresh_files(...)`
+  Starts SDK-owned background refresh work with the same pollable snapshot model.
+- `QuickContext.get_operation_status(...)` and `QuickContext.list_operation_statuses(...)`
+  Poll live indexing and refresh snapshots, including stage, files remaining, chunks kept, description progress, embedding progress, and points upserted.
 - `QuickContext.warm_project(...)`
   Optional startup warmup for the long-lived Rust service. It preloads the persisted Rust symbol and text indices for a project so the first real query is cheaper.
 - `QuickContext.start_background_warm(...)`
