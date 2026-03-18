@@ -1058,13 +1058,10 @@ def list_projects(ctx: click.Context) -> None:
 
     try:
         with QuickContext(config) as qc:
-            from engine.src.collection import CollectionManager
-            mgr = CollectionManager(
-                client=qc.connection.client,
-                config=config,
-                collection_name="_dummy",
-            )
-            projects = mgr.list_all_projects()
+            if not qc.qdrant_available(verify=True):
+                console.print(f"[red]Qdrant is unreachable at {config.qdrant.url}[/red]")
+                sys.exit(1)
+            projects = qc.list_projects()
 
             if not projects:
                 console.print("[yellow]No projects indexed[/yellow]")
@@ -1079,13 +1076,13 @@ def list_projects(ctx: click.Context) -> None:
 
             for proj in projects:
                 vector_info = ", ".join(
-                    f"{name}({v['size']}d)" for name, v in proj["vectors"].items()
+                    f"{name}({v['size']}d)" for name, v in proj.vectors.items()
                 )
                 table.add_row(
-                    proj["name"],
-                    proj["real_collection"],
-                    str(proj["points_count"]),
-                    proj["status"],
+                    proj.project_name,
+                    proj.real_collection or proj.project_name,
+                    str(proj.points_count or 0),
+                    proj.status or "unknown",
                     vector_info,
                 )
 

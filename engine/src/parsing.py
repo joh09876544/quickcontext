@@ -8,6 +8,10 @@ import os
 from engine.src.pipe import PIPE_NAME, PipeClient, PipeProtocolError
 
 
+def _normalize_file_path(value: Any) -> str:
+    return str(value or "").replace("\\\\?\\", "")
+
+
 @dataclass(frozen=True, slots=True)
 class ExtractedSymbol:
     """
@@ -60,7 +64,7 @@ class ExtractedSymbol:
             name=str(data.get("name", "")),
             kind=str(data.get("kind", "")),
             language=str(data.get("language", "")),
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             line_start=int(data.get("line_start", 0)),
             line_end=int(data.get("line_end", 0)),
             byte_start=int(data.get("byte_start", 0)),
@@ -119,7 +123,7 @@ class ExtractionResult:
         file_mtime_raw = data.get("file_mtime")
 
         return ExtractionResult(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             language=str(data.get("language", "")),
             symbols=symbols,
             errors=errors,
@@ -169,7 +173,7 @@ class CompactSymbol:
             name=str(data.get("name", "")),
             kind=str(data.get("kind", "")),
             language=str(data.get("language", "")),
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             line_start=int(data.get("line_start", 0)),
             line_end=int(data.get("line_end", 0)),
             signature=data.get("signature"),
@@ -218,7 +222,7 @@ class CompactExtractionResult:
         file_size_raw = data.get("file_size")
         file_mtime_raw = data.get("file_mtime")
         return CompactExtractionResult(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             language=str(data.get("language", "")),
             symbols=symbols,
             symbol_count=int(data.get("symbol_count", len(symbols))),
@@ -247,7 +251,7 @@ class FileScanEntry:
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "FileScanEntry":
         return FileScanEntry(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             language=str(data.get("language", "")),
             file_size=int(data.get("file_size", 0)),
             file_mtime=int(data.get("file_mtime", 0)),
@@ -319,7 +323,7 @@ class ExtractSymbolResult:
             if isinstance(item, dict)
         ]
         return ExtractSymbolResult(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             language=str(data.get("language", "")),
             query=str(data.get("query", "")),
             symbols=symbols,
@@ -358,7 +362,7 @@ class GrepMatch:
         Returns: GrepMatch — Parsed grep match instance.
         """
         return GrepMatch(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             line_number=int(data.get("line_number", 0)),
             column_start=int(data.get("column_start", 0)),
             column_end=int(data.get("column_end", 0)),
@@ -442,7 +446,7 @@ class SymbolLookupItem:
             name=str(data.get("name", "")),
             kind=str(data.get("kind", "")),
             language=str(data.get("language", "")),
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             line_start=int(data.get("line_start", 0)),
             line_end=int(data.get("line_end", 0)),
             parent=data.get("parent"),
@@ -483,7 +487,7 @@ class SymbolLookupResult:
             if isinstance(item, dict)
         ]
         return SymbolLookupResult(
-            project_root=str(data.get("project_root", "")),
+            project_root=_normalize_file_path(data.get("project_root", "")),
             results=results,
             indexed_files=int(data.get("indexed_files", 0)),
             indexed_symbols=int(data.get("indexed_symbols", 0)),
@@ -524,7 +528,7 @@ class CallerItem:
             caller_name=str(data.get("caller_name", "")),
             caller_kind=str(data.get("caller_kind", "")),
             caller_language=str(data.get("caller_language", "")),
-            caller_file_path=str(data.get("caller_file_path", "")),
+            caller_file_path=_normalize_file_path(data.get("caller_file_path", "")),
             caller_line=int(data.get("caller_line", 0)),
         )
 
@@ -564,7 +568,7 @@ class CallerLookupResult:
             if isinstance(item, dict)
         ]
         return CallerLookupResult(
-            project_root=str(data.get("project_root", "")),
+            project_root=_normalize_file_path(data.get("project_root", "")),
             symbol=str(data.get("symbol", "")),
             callers=callers,
             indexed_files=int(data.get("indexed_files", 0)),
@@ -602,8 +606,8 @@ class ImportEdge:
         Returns: ImportEdge — Parsed import edge.
         """
         return ImportEdge(
-            source_file=str(data.get("source_file", "")),
-            target_file=str(data.get("target_file", "")),
+            source_file=_normalize_file_path(data.get("source_file", "")),
+            target_file=_normalize_file_path(data.get("target_file", "")),
             import_statement=str(data.get("import_statement", "")),
             module_path=str(data.get("module_path", "")),
             language=str(data.get("language", "")),
@@ -646,8 +650,8 @@ class ImportGraphResult:
             if isinstance(item, dict)
         ]
         return ImportGraphResult(
-            file_path=str(data.get("file_path", "")),
-            project_root=str(data.get("project_root", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
+            project_root=_normalize_file_path(data.get("project_root", "")),
             edges=edges,
             total_files=int(data.get("total_files", 0)),
             total_imports=int(data.get("total_imports", 0)),
@@ -684,8 +688,8 @@ class ImportNeighborsResult:
             if isinstance(item, dict)
         ]
         return ImportNeighborsResult(
-            file_path=str(data.get("file_path", "")),
-            project_root=str(data.get("project_root", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
+            project_root=_normalize_file_path(data.get("project_root", "")),
             imports=imports,
             importers=importers,
             total_files=int(data.get("total_files", 0)),
@@ -804,7 +808,7 @@ class TextSearchMatch:
         Returns: TextSearchMatch — Parsed text search match.
         """
         return TextSearchMatch(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             score=float(data.get("score", 0.0)),
             matched_terms=list(data.get("matched_terms", [])),
             snippet=str(data.get("snippet", "")),
@@ -974,7 +978,7 @@ class ProtocolContract:
         evidence_raw = data.get("evidence", [])
 
         return ProtocolContract(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             operation=str(data.get("operation", "")),
             transport=str(data.get("transport", "")),
             endpoint=data.get("endpoint"),
@@ -1103,7 +1107,7 @@ class PatternMatchItem:
             if isinstance(item, dict)
         ]
         return PatternMatchItem(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             language=str(data.get("language", "")),
             matched_text=str(data.get("matched_text", "")),
             line_start=int(data.get("line_start", 0)),
@@ -1225,7 +1229,7 @@ class RewriteFileResult:
             if isinstance(e, dict)
         ]
         return RewriteFileResult(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             edits=edits,
             rewritten_source=data.get("rewritten_source"),
         )
@@ -1325,7 +1329,7 @@ class FileReadResult:
             if isinstance(item, dict)
         ]
         return FileReadResult(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             line_start=int(data.get("line_start", 0)),
             line_end=int(data.get("line_end", 0)),
             total_lines=int(data.get("total_lines", 0)),
@@ -1362,7 +1366,7 @@ class FileEditResult:
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "FileEditResult":
         return FileEditResult(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             applied=bool(data.get("applied", False)),
             dry_run=bool(data.get("dry_run", False)),
             before_hash=str(data.get("before_hash", "")),
@@ -1396,7 +1400,7 @@ class FileEditRevertResult:
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "FileEditRevertResult":
         return FileEditRevertResult(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             reverted=bool(data.get("reverted", False)),
             before_hash=str(data.get("before_hash", "")),
             after_hash=str(data.get("after_hash", "")),
@@ -1424,7 +1428,7 @@ class SymbolEditResult:
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "SymbolEditResult":
         return SymbolEditResult(
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             symbol_name=str(data.get("symbol_name", "")),
             applied=bool(data.get("applied", False)),
             dry_run=bool(data.get("dry_run", False)),
@@ -1472,7 +1476,7 @@ class TraceNode:
             name=str(data.get("name", "")),
             kind=str(data.get("kind", "")),
             language=str(data.get("language", "")),
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
             line_start=int(data.get("line_start", 0)),
             line_end=int(data.get("line_end", 0)),
             depth=int(data.get("depth", 0)),
@@ -1507,7 +1511,7 @@ class TraceEdge:
             from_name=str(data.get("from_name", "")),
             to_name=str(data.get("to_name", "")),
             call_line=int(data.get("call_line", 0)),
-            file_path=str(data.get("file_path", "")),
+            file_path=_normalize_file_path(data.get("file_path", "")),
         )
 
 

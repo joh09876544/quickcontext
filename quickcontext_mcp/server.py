@@ -15,7 +15,6 @@ from fastmcp.server.context import Context
 from pydantic import BaseModel, Field
 
 from engine.sdk import QuickContext
-from engine.src.collection import CollectionManager
 from engine.src.config import EngineConfig
 from engine.src.project import detect_project_name
 
@@ -440,17 +439,6 @@ def _friendly_error_message(exc: Exception) -> str:
     return message
 
 
-def _qdrant_available(config: EngineConfig) -> bool:
-    if config.qdrant is None:
-        return False
-    try:
-        with QuickContext(config) as qc:
-            qc.connect(verify=True)
-        return True
-    except Exception:
-        return False
-
-
 def _phase_timings_from_stats(stats: dict[str, Any]) -> PhaseTimings:
     return PhaseTimings(
         scan_seconds=float(stats.get("scan_stage_duration_seconds", 0.0)),
@@ -524,68 +512,6 @@ def _related_caller_view(item: dict[str, Any]) -> RelatedCallerView:
     return RelatedCallerView.model_validate(normalized)
 
 
-def _list_project_folders(project_root: str | Path, max_depth: int = 5, limit: int = 200) -> list[ProjectFolder]:
-    root = Path(project_root).resolve()
-    if not root.exists() or not root.is_dir():
-        return []
-
-    folders: list[ProjectFolder] = [ProjectFolder(relative_path=".", absolute_path=str(root))]
-    for candidate in sorted(root.rglob("*")):
-        if not candidate.is_dir():
-            continue
-        try:
-            relative = candidate.relative_to(root)
-        except ValueError:
-            continue
-        if len(relative.parts) > max_depth:
-            continue
-        if any(part.startswith(".") for part in relative.parts):
-            continue
-        folders.append(
-            ProjectFolder(
-                relative_path=str(relative).replace("\\", "/"),
-                absolute_path=str(candidate.resolve()),
-            )
-        )
-        if len(folders) >= limit:
-            break
-
-    return folders
-
-
-def _project_catalog(config: EngineConfig) -> dict[str, ProjectSummary]:
-    if config.qdrant is None:
-        return {}
-
-    try:
-        with QuickContext(config) as qc:
-            manager = CollectionManager(
-                client=qc.connection.client,
-                config=config,
-                collection_name="_quickcontext_mcp_dummy",
-            )
-            catalog = {}
-            for item in manager.list_all_projects():
-                catalog[item["name"]] = ProjectSummary(
-                    project_name=item["name"],
-                    indexed=True,
-                    real_collection=item.get("real_collection"),
-                    points_count=int(item.get("points_count", 0)),
-                    indexed_vectors_count=None,
-                    status=item.get("status"),
-                )
-            return catalog
-    except Exception:
-        return {}
-
-
-def _project_summary_for_path(path: Path, project_name: str, config: EngineConfig) -> ProjectSummary | None:
-    summary = _project_catalog(config).get(project_name)
-    if summary is not None:
-        return summary
-    return ProjectSummary(project_name=project_name, indexed=False)
-
-
 def _semantic_hit(result: Any) -> SearchHit:
     return SearchHit(
         kind="semantic",
@@ -629,10 +555,9 @@ def _search_impl(
     anchor = _project_anchor(scope)
     config = _load_config()
     resolved_project = detect_project_name(anchor, manual_override=project_name)
-    summary = _project_summary_for_path(anchor, resolved_project, config)
-    indexed = bool(summary and summary.indexed)
 
     with QuickContext(config) as qc:
+        indexed = qc.project_collection_info(resolved_project).indexed
         if mode == "text":
             result = qc.text_search(
                 query=query,
@@ -742,43 +667,62 @@ def _search_impl(
 
 
 def _project_info_impl(*, path: str, project_name: str | None) -> ProjectInfoResponse:
-    scope = _normalize_scope_path(path)
-    anchor = _project_anchor(scope)
     config = _load_config()
-    resolved_project = detect_project_name(anchor, manual_override=project_name)
-    qdrant_available = _qdrant_available(config)
-
     with QuickContext(config) as qc:
-        status = qc.status()
-        cache = qc.cache_status(anchor)
-        summary = _project_summary_for_path(anchor, resolved_project, config)
+        info = qc.project_info(
+            path=path,
+            project_name=project_name,
+            include_folders=True,
+        )
 
     active_runs = [
         _index_run_view(record)
-        for record in _INDEX_REGISTRY.list_active_for_target(path=str(anchor), project_name=resolved_project)
+        for record in _INDEX_REGISTRY.list_active_for_target(path=info.path, project_name=info.project_name)
     ]
 
     return ProjectInfoResponse(
-        path=_display_path(anchor),
-        project_name=resolved_project,
-        indexed=bool(summary and summary.indexed),
-        qdrant_enabled=config.qdrant is not None,
-        qdrant_available=qdrant_available,
-        parser_connected=bool(status.get("parser", {}).get("connected", False)),
-        cache_entries=int(cache.get("entries", 0)),
-        cache_disk_bytes=int(cache.get("disk_bytes", 0)),
-        cache_path=str(cache.get("cache_path", "")),
-        collection=summary,
+        path=_display_path(info.path),
+        project_name=info.project_name,
+        indexed=info.indexed,
+        qdrant_enabled=info.qdrant_enabled,
+        qdrant_available=info.qdrant_available,
+        parser_connected=info.parser_connected,
+        cache_entries=info.cache_entries,
+        cache_disk_bytes=info.cache_disk_bytes,
+        cache_path=info.cache_path,
+        collection=ProjectSummary(
+            project_name=info.collection.project_name,
+            indexed=info.collection.indexed,
+            real_collection=info.collection.real_collection,
+            points_count=info.collection.points_count,
+            indexed_vectors_count=info.collection.indexed_vectors_count,
+            status=info.collection.status,
+        ),
         active_index_runs=active_runs,
-        folders=_list_project_folders(anchor),
+        folders=[
+            ProjectFolder(relative_path=item.relative_path, absolute_path=_display_path(item.absolute_path))
+            for item in info.folders
+        ],
     )
 
 
 def _list_projects_impl() -> ListProjectsResponse:
     config = _load_config()
-    catalog = sorted(_project_catalog(config).values(), key=lambda item: item.project_name.lower())
+    with QuickContext(config) as qc:
+        catalog = [
+            ProjectSummary(
+                project_name=item.project_name,
+                indexed=item.indexed,
+                real_collection=item.real_collection,
+                points_count=item.points_count,
+                indexed_vectors_count=item.indexed_vectors_count,
+                status=item.status,
+            )
+            for item in sorted(qc.list_projects(), key=lambda entry: entry.project_name.lower())
+        ]
+        qdrant_available = qc.qdrant_available(verify=True)
     return ListProjectsResponse(
-        qdrant_available=_qdrant_available(config),
+        qdrant_available=qdrant_available,
         projects=catalog,
         active_index_runs=[
             _index_run_view(record)

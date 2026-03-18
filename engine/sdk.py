@@ -81,6 +81,7 @@ from engine.src.packer import (
     truncate_source,
 )
 from engine.src.project import detect_project_name
+from engine.src.sdk_models import ProjectCollectionInfo, ProjectFolderInfo, ProjectInfo
 from engine.src.search_modes import BIAS_NAMES, SearchBias, apply_bias, get_bias
 
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -3931,6 +3932,36 @@ class QuickContext:
 
         collection.cleanup_old_versions()
 
+    def _ensure_indexing_backends_ready(
+        self,
+        *,
+        operation_name: str,
+        generate_descriptions: bool,
+    ) -> None:
+        missing = []
+        if self._config.qdrant is None:
+            missing.append("qdrant")
+        if self._config.code_embedding is None:
+            missing.append("code_embedding")
+        if self._config.desc_embedding is None:
+            missing.append("desc_embedding")
+        if generate_descriptions and self._config.llm is None:
+            missing.append("llm")
+        if missing:
+            raise RuntimeError(
+                f"Cannot {operation_name}: disabled subsystems: {', '.join(missing)}. "
+                "Indexing requires qdrant, code_embedding, desc_embedding, and llm when descriptions are enabled."
+            )
+
+        try:
+            self.connect(verify=True)
+        except ConnectionError as exc:
+            assert self._config.qdrant is not None
+            raise RuntimeError(
+                f"Cannot {operation_name}: Qdrant is unreachable at {self._config.qdrant.url}. "
+                "Start Qdrant or update the active config before indexing."
+            ) from exc
+
     def index_directory(
         self,
         directory: str | Path,
@@ -3976,21 +4007,10 @@ class QuickContext:
         from engine.src.indexer import IndexStats
 
         started_at = time.time()
-
-        missing = []
-        if self._config.qdrant is None:
-            missing.append("qdrant")
-        if self._config.code_embedding is None:
-            missing.append("code_embedding")
-        if self._config.desc_embedding is None:
-            missing.append("desc_embedding")
-        if generate_descriptions and self._config.llm is None:
-            missing.append("llm")
-        if missing:
-            raise RuntimeError(
-                f"Cannot index: disabled subsystems: {', '.join(missing)}. "
-                "Indexing requires qdrant, code_embedding, desc_embedding, and llm when descriptions are enabled."
-            )
+        self._ensure_indexing_backends_ready(
+            operation_name="index",
+            generate_descriptions=generate_descriptions,
+        )
 
         directory = Path(directory).resolve()
 
@@ -4615,21 +4635,6 @@ class QuickContext:
 
         started_at = time.time()
 
-        missing = []
-        if self._config.qdrant is None:
-            missing.append("qdrant")
-        if self._config.code_embedding is None:
-            missing.append("code_embedding")
-        if self._config.desc_embedding is None:
-            missing.append("desc_embedding")
-        if self._config.llm is None and generate_descriptions:
-            missing.append("llm")
-        if missing:
-            raise RuntimeError(
-                f"Cannot refresh: disabled subsystems: {', '.join(missing)}. "
-                "Refreshing requires qdrant, code_embedding, desc_embedding, and llm."
-            )
-
         resolved_paths = [str(Path(p).resolve()) for p in file_paths]
 
         if not resolved_paths:
@@ -4697,6 +4702,11 @@ class QuickContext:
                 embedding_cost_usd=0.0,
                 descriptions_enabled=generate_descriptions,
             )
+
+        self._ensure_indexing_backends_ready(
+            operation_name="refresh",
+            generate_descriptions=generate_descriptions,
+        )
 
         if show_progress:
             print(f"Analyzing changes in {len(paths_to_extract)} files...")
@@ -4989,7 +4999,162 @@ class QuickContext:
 
         return stats
 
-    def status(self) -> dict:
+    def qdrant_available(self, verify: bool = True) -> bool:
+        """
+        Return True when the configured Qdrant backend is reachable.
+
+        verify: bool — When True, actively probe Qdrant instead of only checking an
+        existing cached client state.
+        """
+        if self._config.qdrant is None:
+            return False
+
+        if not verify:
+            return self._conn.is_alive() if self._conn is not None else False
+
+        try:
+            self.connect(verify=True)
+            return True
+        except ConnectionError:
+            return False
+
+    def _project_collection_from_info(
+        self,
+        project_name: str,
+        info: dict | None,
+        indexed: bool,
+    ) -> ProjectCollectionInfo:
+        if not info:
+            return ProjectCollectionInfo(project_name=project_name, indexed=indexed)
+
+        return ProjectCollectionInfo(
+            project_name=project_name,
+            indexed=indexed,
+            real_collection=info.get("real_collection"),
+            points_count=info.get("points_count"),
+            indexed_vectors_count=info.get("indexed_vectors_count"),
+            segments_count=info.get("segments_count"),
+            status=info.get("status"),
+            vectors=dict(info.get("vectors", {})),
+        )
+
+    def project_collection_info(self, project_name: str) -> ProjectCollectionInfo:
+        """
+        Return collection metadata for one logical project.
+        """
+        if self._config.qdrant is None or not self.qdrant_available(verify=True):
+            return ProjectCollectionInfo(project_name=project_name, indexed=False)
+
+        try:
+            info = self._get_collection(project_name).info()
+        except Exception:
+            return ProjectCollectionInfo(project_name=project_name, indexed=False)
+
+        points_count = int(info.get("points_count", 0) or 0)
+        return self._project_collection_from_info(
+            project_name=project_name,
+            info=info,
+            indexed=points_count > 0,
+        )
+
+    def list_projects(self) -> list[ProjectCollectionInfo]:
+        """
+        List indexed projects visible through the configured Qdrant backend.
+        """
+        if self._config.qdrant is None or not self.qdrant_available(verify=True):
+            return []
+
+        from engine.src.collection import CollectionManager
+
+        manager = CollectionManager(
+            client=self.connection.client,
+            config=self._config,
+            collection_name="_sdk_projects",
+        )
+        projects = []
+        for item in manager.list_all_projects():
+            points_count = int(item.get("points_count", 0) or 0)
+            projects.append(
+                self._project_collection_from_info(
+                    project_name=str(item.get("name", "")),
+                    info=item,
+                    indexed=points_count > 0,
+                )
+            )
+        return projects
+
+    def _list_project_folders(
+        self,
+        project_root: str | Path,
+        max_depth: int = 5,
+        limit: int = 200,
+    ) -> list[ProjectFolderInfo]:
+        root = Path(project_root).resolve()
+        if not root.exists() or not root.is_dir():
+            return []
+
+        folders = [ProjectFolderInfo(relative_path=".", absolute_path=str(root))]
+        for candidate in sorted(root.rglob("*")):
+            if not candidate.is_dir():
+                continue
+            try:
+                relative = candidate.relative_to(root)
+            except ValueError:
+                continue
+            if len(relative.parts) > max_depth:
+                continue
+            if any(part.startswith(".") for part in relative.parts):
+                continue
+            folders.append(
+                ProjectFolderInfo(
+                    relative_path=str(relative).replace("\\", "/"),
+                    absolute_path=str(candidate.resolve()),
+                )
+            )
+            if len(folders) >= limit:
+                break
+
+        return folders
+
+    def project_info(
+        self,
+        path: str | Path = ".",
+        project_name: Optional[str] = None,
+        include_folders: bool = False,
+        folder_max_depth: int = 5,
+        folder_limit: int = 200,
+    ) -> ProjectInfo:
+        """
+        Return stable project discovery metadata for downstream wrappers.
+        """
+        scope = Path(path).resolve()
+        anchor = scope.parent if scope.is_file() else scope
+        resolved_project = detect_project_name(anchor, manual_override=project_name)
+        qdrant_enabled = self._config.qdrant is not None
+        qdrant_available = self.qdrant_available(verify=True) if qdrant_enabled else False
+
+        cache = self.cache_status(anchor)
+        collection = self.project_collection_info(resolved_project)
+        folders = (
+            self._list_project_folders(anchor, max_depth=folder_max_depth, limit=folder_limit)
+            if include_folders else []
+        )
+
+        return ProjectInfo(
+            path=str(anchor),
+            project_name=resolved_project,
+            indexed=collection.indexed,
+            qdrant_enabled=qdrant_enabled,
+            qdrant_available=qdrant_available,
+            parser_connected=self.parser_service.connected,
+            cache_entries=int(cache.get("entries", 0)),
+            cache_disk_bytes=int(cache.get("disk_bytes", 0)),
+            cache_path=str(cache.get("cache_path", "")),
+            collection=collection,
+            folders=folders,
+        )
+
+    def status(self, verify_qdrant: bool = True) -> dict:
         """
         Get engine status: connection health, collection info, provider details.
 
@@ -4998,9 +5163,10 @@ class QuickContext:
         result = {}
 
         if self._config.qdrant is not None:
-            alive = self._conn.is_alive() if self._conn else False
+            alive = self.qdrant_available(verify=verify_qdrant)
             result["qdrant"] = {
                 "url": self._config.qdrant.url,
+                "configured": True,
                 "alive": alive,
             }
         else:

@@ -14,6 +14,12 @@ The SDK now includes AI-facing retrieval helpers:
 
 - `QuickContext.retrieve_context_auto(...)`
   Default AI entrypoint. It routes exact symbol questions to the Rust symbol index first, expands behavior-oriented symbol questions with same-file helper symbols from indexed Rust metadata plus targeted source hydration, falls back to semantic or bundle retrieval for broader natural-language questions, enriches strong text-primary queries with import-aware and module-local related files, accepts explicit `path=` scoping when the target repo is outside the current working directory, and degrades to Rust text retrieval when an external repo has not been vector-indexed yet.
+- `QuickContext.project_info(...)`
+  Stable project discovery entrypoint for downstream wrappers. It reports the detected project name, cache state, parser connectivity, Qdrant availability, current collection metadata, and optional folder scopes.
+- `QuickContext.list_projects(...)`
+  Returns typed project collection summaries so wrappers no longer need to import `CollectionManager` directly just to discover indexed projects.
+- `QuickContext.qdrant_available(...)`
+  Explicit backend health probe for wrappers that need to distinguish “no indexed projects” from “vector store is currently unreachable”.
 - `QuickContext.warm_project(...)`
   Optional startup warmup for the long-lived Rust service. It preloads the persisted Rust symbol and text indices for a project so the first real query is cheaper.
 - `QuickContext.start_background_warm(...)`

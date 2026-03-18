@@ -96,6 +96,10 @@ LIGHT_RESULT_PAYLOAD_FIELDS = [
 FULL_RESULT_PAYLOAD_FIELDS = LIGHT_RESULT_PAYLOAD_FIELDS + ["source"]
 
 
+def _normalize_result_path(path: str) -> str:
+    return str(path or "").replace("\\\\?\\", "")
+
+
 @dataclass(frozen=True, slots=True)
 class SearchResult:
     """
@@ -755,7 +759,7 @@ class CodeSearcher:
 
             symbol_kind_value = point.payload.get("symbol_kind") or point.payload.get("symbol_type") or "unknown"
             symbol_name_value = point.payload["symbol_name"]
-            file_path_value = point.payload["file_path"]
+            file_path_value = _normalize_result_path(point.payload["file_path"])
             final_score *= self._kind_score_multiplier(symbol_kind_value, len(ranking_keywords))
             final_score *= self._path_signal_multiplier(file_path_value, ranking_keywords)
             final_score += self._basename_hit_bonus(file_path_value, ranking_keywords)
@@ -1030,7 +1034,7 @@ class CodeSearcher:
 
             symbol_kind_value = point.payload.get("symbol_kind") or point.payload.get("symbol_type") or "unknown"
             symbol_name_value = point.payload["symbol_name"]
-            file_path_value = point.payload["file_path"]
+            file_path_value = _normalize_result_path(point.payload["file_path"])
             final_score *= self._kind_score_multiplier(symbol_kind_value, len(ranking_keywords))
             final_score *= self._path_signal_multiplier(file_path_value, ranking_keywords)
             final_score += self._basename_hit_bonus(file_path_value, ranking_keywords)
@@ -1157,7 +1161,7 @@ class CodeSearcher:
             hydrated.append(
                 SearchResult(
                     score=result.score,
-                    file_path=payload.get("file_path", result.file_path),
+                    file_path=_normalize_result_path(payload.get("file_path", result.file_path)),
                     symbol_name=payload.get("symbol_name", result.symbol_name),
                     symbol_kind=payload.get("symbol_kind") or payload.get("symbol_type") or result.symbol_kind,
                     line_start=payload.get("line_start", result.line_start),
