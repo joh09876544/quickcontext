@@ -68,3 +68,29 @@ class IndexOperationSnapshot:
     points_failed: int = 0
     final_stats: dict[str, Any] | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LspInstallStepInfo:
+    manager: str
+    command: str
+    note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LspServerSetupInfo:
+    name: str
+    language_id: str
+    binary: str
+    installed: bool
+    detection_reasons: list[str] = field(default_factory=list)
+    auto_install_supported: bool = False
+    install_steps: list[LspInstallStepInfo] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class LspSetupPlanInfo:
+    target_path: str
+    platform: str
+    servers: list[LspServerSetupInfo] = field(default_factory=list)

@@ -275,6 +275,7 @@ Useful environment variables:
 
 ```text
 python -m engine parse .
+python -m engine lsp-setup <path>
 python -m engine grep "CollectionManager"
 python -m engine skeleton . --markdown
 python -m engine text-search "auth token"
@@ -289,6 +290,35 @@ python -m engine watch .
 python -m engine list-projects
 python -m engine status
 ```
+
+## LSP Setup
+
+quickcontext can detect which language servers a target project likely needs and print install commands for missing ones.
+
+Preview the plan:
+
+```text
+python -m engine lsp-setup "C:/path/to/project"
+```
+
+Run supported auto-installs:
+
+```text
+python -m engine lsp-setup "C:/path/to/project" --install
+```
+
+Windows PowerShell wrapper:
+
+```powershell
+.\scripts\setup_project_lsps.ps1 -Path "C:\path\to\project"
+.\scripts\setup_project_lsps.ps1 -Path "C:\path\to\project" -Install
+```
+
+Notes:
+
+- The setup command is project-scoped. Pass the actual target repo path.
+- Some servers have automatic install commands; others are reported as manual-only with notes.
+- The command checks whether the expected LSP binary is already on `PATH`.
 
 ## Validation
 

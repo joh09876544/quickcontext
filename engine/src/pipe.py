@@ -1027,6 +1027,25 @@ class PipeClient:
             raise PipeProtocolError("invalid symbol edit response payload")
         return data
 
+    def lsp_definition(self, file: str, line: int, character: int) -> dict:
+        """Go to definition of symbol at position via LSP.
+
+        * file -- str, absolute path to the source file
+        * line -- int, zero-based line number
+        * character -- int, zero-based character offset
+
+        Returns dict with definition location(s).
+        """
+        resp = self.request({
+            "method": "lsp_definition",
+            "file": file,
+            "line": line,
+            "character": character,
+        })
+        if resp.get("status") == "error":
+            raise PipeError(resp.get("message", "lsp definition failed"))
+        return resp.get("data", {})
+
     def lsp_references(
         self,
         file: str,

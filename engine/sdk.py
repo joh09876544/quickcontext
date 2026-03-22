@@ -24,6 +24,7 @@ from engine.src.dedup import (
     expand_embeddings,
 )
 from engine.src.filecache import FileSignatureCache
+from engine.src.lsp_setup import build_lsp_setup_plan
 from engine.src.operation_status import GLOBAL_OPERATION_REGISTRY, OperationProgressReporter, snapshot_to_dict
 
 if TYPE_CHECKING:
@@ -82,7 +83,15 @@ from engine.src.packer import (
     truncate_source,
 )
 from engine.src.project import detect_project_name
-from engine.src.sdk_models import IndexOperationSnapshot, ProjectCollectionInfo, ProjectFolderInfo, ProjectInfo
+from engine.src.sdk_models import (
+    IndexOperationSnapshot,
+    LspInstallStepInfo,
+    LspServerSetupInfo,
+    LspSetupPlanInfo,
+    ProjectCollectionInfo,
+    ProjectFolderInfo,
+    ProjectInfo,
+)
 from engine.src.search_modes import BIAS_NAMES, SearchBias, apply_bias, get_bias
 
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -5446,6 +5455,36 @@ class QuickContext:
             cache_path=str(cache.get("cache_path", "")),
             collection=collection,
             folders=folders,
+        )
+
+    def lsp_setup_plan(self, path: str | Path) -> LspSetupPlanInfo:
+        """
+        Build a project-specific LSP setup plan for downstream wrappers and the CLI.
+        """
+        plan = build_lsp_setup_plan(path)
+        return LspSetupPlanInfo(
+            target_path=plan.target_path,
+            platform=plan.platform,
+            servers=[
+                LspServerSetupInfo(
+                    name=server.name,
+                    language_id=server.language_id,
+                    binary=server.binary,
+                    installed=server.installed,
+                    detection_reasons=list(server.detection_reasons),
+                    auto_install_supported=server.auto_install_supported,
+                    install_steps=[
+                        LspInstallStepInfo(
+                            manager=step.manager,
+                            command=step.command,
+                            note=step.note,
+                        )
+                        for step in server.install_steps
+                    ],
+                    notes=list(server.notes),
+                )
+                for server in plan.servers
+            ],
         )
 
     def start_index_directory(

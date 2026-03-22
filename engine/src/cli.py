@@ -11,6 +11,7 @@ from rich.table import Table
 
 from engine import QuickContext
 from engine.src.config import EngineConfig
+from engine.src.lsp_setup import install_lsp_servers
 from engine.src.keywords import extract_keywords
 from engine.src.project import detect_project_name
 
@@ -2208,6 +2209,130 @@ def pattern_rewrite(ctx: click.Context, pattern: str | None, replacement: str, l
             console.print(f"    [red]- {edit.original}[/red]")
             console.print(f"    [green]+ {edit.replacement}[/green]")
         console.print()
+
+
+@cli.command("lsp-setup")
+@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.option("--install", is_flag=True, help="Run auto-install commands for supported missing language servers.")
+@click.option("--server", "servers", multiple=True, help="Limit install execution to one or more server names.")
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt when used with --install.")
+@click.option("--json-output", is_flag=True, help="Print the setup plan as JSON.")
+@click.pass_context
+def lsp_setup(
+    ctx: click.Context,
+    path: Path,
+    install: bool,
+    servers: tuple[str, ...],
+    yes: bool,
+    json_output: bool,
+) -> None:
+    """
+    Detect project languages and show how to install the required LSP servers.
+    """
+    config = ctx.obj["config"]
+
+    try:
+        with QuickContext(config) as qc:
+            plan = qc.lsp_setup_plan(path)
+
+        if json_output:
+            console.print_json(json.dumps({
+                "target_path": plan.target_path,
+                "platform": plan.platform,
+                "servers": [
+                    {
+                        "name": server.name,
+                        "language_id": server.language_id,
+                        "binary": server.binary,
+                        "installed": server.installed,
+                        "detection_reasons": server.detection_reasons,
+                        "auto_install_supported": server.auto_install_supported,
+                        "install_steps": [
+                            {
+                                "manager": step.manager,
+                                "command": step.command,
+                                "note": step.note,
+                            }
+                            for step in server.install_steps
+                        ],
+                        "notes": server.notes,
+                    }
+                    for server in plan.servers
+                ],
+            }, indent=2))
+            return
+
+        if not plan.servers:
+            console.print("[yellow]No known LSP servers detected for this target.[/yellow]")
+            return
+
+        table = Table(title=f"LSP Setup Plan ({plan.platform})")
+        table.add_column("Language", style="cyan")
+        table.add_column("Server", style="white")
+        table.add_column("Binary", style="dim")
+        table.add_column("Installed", style="green")
+        table.add_column("Auto", style="yellow")
+        table.add_column("Why", style="white")
+
+        for server in plan.servers:
+            table.add_row(
+                server.language_id,
+                server.name,
+                server.binary,
+                "yes" if server.installed else "no",
+                "yes" if server.auto_install_supported else "manual",
+                "; ".join(server.detection_reasons[:2]),
+            )
+
+        console.print(table)
+        console.print()
+        for server in plan.servers:
+            if server.installed:
+                continue
+            console.print(f"[bold]{server.name}[/bold]")
+            for step in server.install_steps:
+                note_suffix = f"  # {step.note}" if step.note else ""
+                console.print(f"  {step.command}{note_suffix}")
+            for note in server.notes:
+                console.print(f"  {note}")
+            console.print()
+
+        if not install:
+            return
+
+        installable = [
+            server for server in plan.servers
+            if not server.installed and server.auto_install_supported
+            and (not servers or server.name in servers or server.language_id in servers)
+        ]
+        if not installable:
+            console.print("[yellow]No auto-installable missing servers matched the request.[/yellow]")
+            return
+
+        if not yes:
+            click.confirm(
+                f"Run install commands for {len(installable)} language server(s)?",
+                abort=True,
+            )
+
+        results = install_lsp_servers(plan, server_names=list(servers) if servers else None)
+        result_table = Table(title="LSP Install Results")
+        result_table.add_column("Server", style="cyan")
+        result_table.add_column("Success", style="green")
+        result_table.add_column("Command", style="white")
+        result_table.add_column("Message", style="dim")
+        for item in results:
+            result_table.add_row(
+                item.server_name,
+                "yes" if item.success else "no",
+                item.command,
+                item.message,
+            )
+        console.print(result_table)
+
+    except Exception as exc:
+        console.print(f"[red]LSP setup failed:[/red] {exc}")
+        sys.exit(1)
 
 
 @cli.command("lsp-definition")

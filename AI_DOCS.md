@@ -159,6 +159,7 @@ Common SDK and engine flow:
 
 - `python -m engine status`
 - `python -m engine init`
+- `python -m engine lsp-setup <path>`
 - `python -m engine warm .`
 - `python -m engine benchmark-context --project <name> --path <target-root> --cases-file <cases.json>`
 - `python -m engine benchmark-compare --project <name> --path <target-root> --cases-file <cases.json>`
@@ -168,6 +169,12 @@ Common SDK and engine flow:
 - `python -m engine watch <dir>`
 
 Use the CLI to validate and benchmark the same underlying service and SDK behavior. Do not treat CLI startup as the main product surface.
+
+LSP setup:
+
+- `python -m engine lsp-setup <path>` detects likely language servers for a target project and prints install commands for missing binaries
+- `python -m engine lsp-setup <path> --install` runs the supported auto-install commands
+- `scripts/setup_project_lsps.ps1` is the Windows PowerShell wrapper around that CLI command
 
 ## Validation And Benchmarking
 
