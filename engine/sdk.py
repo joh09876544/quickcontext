@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from dataclasses import asdict, replace
+import hashlib
 from pathlib import Path
 import re
 import time
@@ -2951,13 +2952,46 @@ class QuickContext:
             block = "\n".join(snippet_lines).lower()
             if matched_terms and matched_terms.issubset(project_terms) and domain_terms and not any(term in block for term in domain_terms):
                 penalty_factor = 0.55
+        focused_source = "\n".join(snippet_lines)
+        focused_description = str(getattr(item, "description", "") or "")
+        llm_cfg = self._config.llm
+        if llm_cfg is not None and llm_cfg.artifact_metadata_enabled:
+            focus_chunk = CodeChunk(
+                chunk_id=hashlib.sha256(f"{file_path}:{start_line}:{end_line}".encode("utf-8")).hexdigest(),
+                source=focused_source,
+                language=str(getattr(item, "language", "") or ""),
+                file_path=file_path,
+                symbol_name="<artifact_focus>",
+                symbol_kind="file_artifact",
+                line_start=start_line,
+                line_end=end_line,
+                byte_start=0,
+                byte_end=0,
+                signature=None,
+                docstring=None,
+                parent=None,
+                visibility=None,
+                role="generated",
+                file_hash="",
+            )
+            try:
+                focused_metadata = self.describer.generate_lightweight_metadata_batch(
+                    [focus_chunk],
+                    request_batch_size=1,
+                    max_tokens=max(64, int(llm_cfg.artifact_metadata_max_tokens)),
+                )[0]
+                if focused_metadata.description:
+                    focused_description = focused_metadata.description
+            except Exception:
+                pass
         return replace(
             item,
             score=(float(getattr(item, "score", 0.0)) * penalty_factor) + (best_score * 0.05),
             symbol_name="<artifact_focus>",
             line_start=start_line,
             line_end=end_line,
-            source="\n".join(snippet_lines),
+            source=focused_source,
+            description=focused_description,
         )
 
     def _text_matches_to_related_files(

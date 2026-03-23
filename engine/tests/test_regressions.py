@@ -1603,6 +1603,55 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("used_trial", focused[0].source)
         self.assertGreater(focused[0].score, match.score)
 
+    def test_focus_artifact_result_can_upgrade_description_with_lightweight_metadata(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=LLMConfig(artifact_metadata_enabled=True, artifact_metadata_max_tokens=128),
+                vectors=[],
+            )
+        )
+        try:
+            from engine.src.searcher import SearchResult
+
+            artifact = SearchResult(
+                1.0,
+                "bundle.js",
+                "<artifact_summary>",
+                "file_artifact",
+                1,
+                50,
+                "Generated bundle summary",
+                "summary",
+                language="javascript",
+            )
+            grep_match = type(
+                "GrepMatch",
+                (),
+                {
+                    "line_number": 40,
+                    "context_before": ("let a = 1;",),
+                    "line": 'const used_trial = false;',
+                    "context_after": ('const windsurf_pro_trial_end_time = 1;',),
+                },
+            )()
+            with mock.patch.object(qc, "grep_text", return_value=type("GrepResult", (), {"matches": [grep_match]})()), mock.patch.object(
+                qc.describer,
+                "generate_lightweight_metadata_batch",
+                return_value=[ChunkDescription("x", "Trial state metadata", ["trial", "eligibility"], 1, 0.001)],
+            ):
+                focused = qc._focus_artifact_results(
+                    "What are the requirements to start a free trial?",
+                    [artifact],
+                    path="C:/tmp/windsurf.com",
+                )
+        finally:
+            qc.close()
+
+        self.assertEqual(focused[0].description, "Trial state metadata")
+
     def test_focus_generated_file_match_results_penalizes_generic_start_only_snippet(self) -> None:
         qc = QuickContext(
             EngineConfig(
