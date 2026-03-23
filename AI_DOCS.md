@@ -75,6 +75,7 @@ Important config ideas:
 - fast indexing now downgrades obvious large minified JavaScript bundle artifacts to a small number of coarse file chunks before deep extraction so generated trees do not pay full parser cost for low-value bundles
 - generated artifact chunks now prepend a deterministic semantic projection of extracted services, methods, types, fields, and relevant strings so semantic retrieval has better signal on dist-heavy JavaScript bundles even when fast mode skips full symbol extraction
 - when Rust extraction returns no symbols for a file and a ready language server exists for that language, the SDK now opportunistically enriches that file with LSP document symbols before chunking so indexing can still use AST-backed structure instead of falling back straight to whole-file chunks
+- on Windows, LSP readiness checks and Rust LSP spawning now resolve npm-global binaries directly, so installing npm-based language servers does not require restarting the shell just to make them discoverable
 - `index_directory(...)` and `refresh_files(...)` now expose real phase timings for scan, artifact profiling, extraction, chunk building, filtering, dedup, description generation, embedding, point building, and Qdrant upsert
 
 ## Important Python Modules

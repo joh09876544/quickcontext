@@ -442,15 +442,58 @@ pub fn resolve_binary(binary: &str) -> Option<String> {
 
     let locator = if cfg!(windows) { "where" } else { "which" };
     let output = Command::new(locator).arg(binary).output().ok()?;
-    if !output.status.success() {
+    if output.status.success() {
+        if let Some(line) = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+        {
+            if cfg!(windows) {
+                let path = Path::new(line);
+                if path.extension().is_none() {
+                    for suffix in [".cmd", ".exe", ".bat"] {
+                        let candidate = format!("{line}{suffix}");
+                        if Path::new(&candidate).exists() {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+            return Some(line.to_string());
+        }
+    }
+
+    let npm_prefix = Command::new("npm")
+        .args(["prefix", "-g"])
+        .output()
+        .ok()?;
+    if !npm_prefix.status.success() {
         return None;
     }
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.to_string())
+    let base = String::from_utf8_lossy(&npm_prefix.stdout).trim().to_string();
+    if base.is_empty() {
+        return None;
+    }
+
+    let suffixes: &[&str] = if cfg!(windows) {
+        &[".cmd", ".exe", ".bat", ""]
+    } else {
+        &[""]
+    };
+
+    for suffix in suffixes {
+        let candidate = if cfg!(windows) {
+            format!("{base}\\{binary}{suffix}")
+        } else {
+            format!("{base}/bin/{binary}{suffix}")
+        };
+        if Path::new(&candidate).exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 pub fn find_binary(binary: &str) -> bool {

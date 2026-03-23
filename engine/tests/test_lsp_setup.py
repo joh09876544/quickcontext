@@ -118,6 +118,30 @@ class LspSetupTests(unittest.TestCase):
         by_name = {server.name: server for server in plan.servers}
         self.assertEqual(by_name["rust-analyzer"].status, "ready")
 
+    def test_lsp_check_resolves_windows_npm_global_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text("{}", encoding="utf-8")
+            (root / "main.ts").write_text("export const x = 1;\n", encoding="utf-8")
+            npm_bin = Path(tmp) / "npm-bin"
+            npm_bin.mkdir()
+            binary = npm_bin / "typescript-language-server.cmd"
+            binary.write_text("@echo off\r\necho typescript-language-server 1.0.0\r\n", encoding="utf-8")
+            completed = mock.Mock(returncode=0, stdout="typescript-language-server 1.0.0\n", stderr="")
+            with mock.patch("engine.src.lsp_setup.shutil.which", return_value=None), mock.patch(
+                "engine.src.lsp_setup._npm_global_bin_dir",
+                return_value=str(npm_bin),
+            ), mock.patch(
+                "engine.src.lsp_setup.subprocess.run",
+                return_value=completed,
+            ) as run:
+                plan = build_lsp_check_plan(root)
+
+        by_name = {server.name: server for server in plan.servers}
+        self.assertEqual(by_name["typescript-language-server"].status, "ready")
+        called_args = run.call_args.args[0]
+        self.assertEqual(str(called_args[0]), str(binary))
+
     def test_quickcontext_exposes_lsp_check_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

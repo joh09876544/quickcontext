@@ -6,6 +6,7 @@ from typing import Literal
 import os
 import shutil
 import subprocess
+from functools import lru_cache
 
 
 PlatformName = Literal["windows", "linux"]
@@ -29,6 +30,8 @@ _IGNORED_DIRS = {
     "_ignore",
     "target",
 }
+
+_WINDOWS_BINARY_SUFFIXES = (".cmd", ".exe", ".bat", "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +134,51 @@ def _r_step(expression: str, note: str | None = None) -> LspInstallStep:
 
 def _winget_step(package_id: str, note: str | None = None) -> LspInstallStep:
     return LspInstallStep(manager="winget", command=f"winget install --exact --id {package_id}", note=note)
+
+
+@lru_cache(maxsize=1)
+def _npm_global_bin_dir() -> str | None:
+    try:
+        completed = subprocess.run(
+            ["npm", "prefix", "-g"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    candidate = (completed.stdout or "").strip()
+    if not candidate:
+        return None
+
+    path = Path(candidate)
+    if os.name == "nt":
+        return str(path)
+    return str(path / "bin")
+
+
+def _resolve_binary_path(binary: str) -> str | None:
+    direct = shutil.which(binary)
+    if direct:
+        return direct
+
+    npm_bin = _npm_global_bin_dir()
+    if not npm_bin:
+        return None
+
+    base = Path(npm_bin)
+    suffixes = _WINDOWS_BINARY_SUFFIXES if os.name == "nt" else ("",)
+    for suffix in suffixes:
+        candidate = base / f"{binary}{suffix}"
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 _SPECS: tuple[_ServerSpec, ...] = (
@@ -483,9 +531,6 @@ _PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
     "R": ("R", "--version"),
     "bash-language-server": ("bash-language-server", "--version"),
     "yaml-language-server": ("yaml-language-server", "--version"),
-    "vscode-json-language-server": ("vscode-json-language-server", "--version"),
-    "vscode-html-language-server": ("vscode-html-language-server", "--version"),
-    "vscode-css-language-server": ("vscode-css-language-server", "--version"),
     "terraform-ls": ("terraform-ls", "--version"),
     "taplo": ("taplo", "--version"),
     "marksman": ("marksman", "--version"),
@@ -559,7 +604,7 @@ def _detect_servers(path: str | Path) -> tuple[Path, list[LspServerSetup]]:
                 name=spec.name,
                 language_id=spec.language_id,
                 binary=spec.binary,
-                installed=shutil.which(spec.binary) is not None,
+                installed=_resolve_binary_path(spec.binary) is not None,
                 detection_reasons=detection_reasons,
                 auto_install_supported=bool(install_steps),
                 install_steps=install_steps,
@@ -581,9 +626,14 @@ def build_lsp_setup_plan(path: str | Path) -> LspSetupPlan:
 
 
 def _run_probe(plan: LspSetupPlan, command: tuple[str, ...]) -> tuple[bool, str]:
+    binary = command[0]
+    resolved_binary = _resolve_binary_path(binary)
+    if resolved_binary is None:
+        return False, "Binary not found on PATH"
+
     try:
         completed = subprocess.run(
-            list(command),
+            [resolved_binary, *command[1:]],
             cwd=plan.target_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
