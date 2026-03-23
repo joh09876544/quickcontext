@@ -401,6 +401,7 @@ class DescriptionGenerator:
         self,
         chunks: list[CodeChunk],
         max_tokens: Optional[int] = None,
+        allow_retry: bool = True,
     ) -> list[ChunkDescription]:
         """
         Generate compact metadata for a batch of chunks in one LLM request.
@@ -444,12 +445,21 @@ class DescriptionGenerator:
 
         per_item_cost = cost / max(1, len(chunks))
         per_item_tokens = token_count // max(1, len(chunks))
+        if len(chunks) > 1:
+            low_value_count = 0
+            for idx, chunk in enumerate(chunks):
+                item = parsed.get(str(idx))
+                if item is None or self._lightweight_metadata_needs_retry(chunk, item):
+                    low_value_count += 1
+            if low_value_count >= max(2, len(chunks) // 2):
+                return [self._generate_lightweight_single_metadata(chunk, max_tokens=max_tokens) for chunk in chunks]
+
         descriptions: list[ChunkDescription] = []
         for idx, chunk in enumerate(chunks):
             item = parsed.get(str(idx))
-            if item is None:
-                if len(chunks) > 1:
-                    descriptions.extend(self._generate_lightweight_metadata_once([chunk], max_tokens=max_tokens))
+            if item is None or self._lightweight_metadata_needs_retry(chunk, item):
+                if len(chunks) > 1 and allow_retry:
+                    descriptions.append(self._generate_lightweight_single_metadata(chunk, max_tokens=max_tokens))
                 else:
                     descriptions.append(build_fallback_description(chunk))
                 continue
@@ -461,8 +471,79 @@ class DescriptionGenerator:
                     token_count=per_item_tokens,
                     cost_usd=per_item_cost,
                 )
-            )
+        )
         return descriptions
+
+    def _lightweight_metadata_needs_retry(
+        self,
+        chunk: CodeChunk,
+        item: dict[str, object],
+    ) -> bool:
+        """
+        Detect low-value batched metadata outputs that should be retried on a smaller batch.
+        """
+        description = str(item.get("description", "") or "").strip()
+        keywords = [str(keyword).strip() for keyword in item.get("keywords", []) if str(keyword).strip()]
+        fallback = build_fallback_description(chunk)
+
+        if not description or len(keywords) < 3:
+            return True
+        if description == fallback.description:
+            return True
+        if description.lower().startswith("generated ") and chunk.symbol_kind == "file_artifact":
+            return True
+        return False
+
+    def _generate_lightweight_single_metadata(
+        self,
+        chunk: CodeChunk,
+        max_tokens: Optional[int] = None,
+    ) -> ChunkDescription:
+        """
+        Generate compact metadata for one generated-code packet with a stricter single-item prompt.
+        """
+        prompt = self._build_lightweight_single_prompt(chunk)
+        kwargs = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": self._lightweight_single_system_prompt()},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": max_tokens or self._max_tokens,
+            "temperature": self._temperature,
+            "api_key": self._api_key,
+        }
+
+        if self._api_base:
+            kwargs["api_base"] = self._api_base
+
+        if self._openrouter_provider:
+            kwargs["extra_body"] = {
+                "provider": {
+                    "order": [self._openrouter_provider]
+                }
+            }
+
+        try:
+            response = _get_litellm().completion(**kwargs)
+            content = response.choices[0].message.content.strip()
+            parsed = self._parse_response(content)
+            try:
+                cost = _get_litellm().completion_cost(completion_response=response)
+            except Exception:
+                cost = float(getattr(getattr(response, "usage", None), "cost", 0.0) or 0.0)
+            token_count = int(getattr(response.usage, "total_tokens", 0) or 0)
+            if self._lightweight_metadata_needs_retry(chunk, parsed):
+                return build_fallback_description(chunk)
+            return ChunkDescription(
+                chunk_id=chunk.chunk_id,
+                description=parsed["description"],
+                keywords=parsed["keywords"],
+                token_count=token_count,
+                cost_usd=cost,
+            )
+        except Exception:
+            return build_fallback_description(chunk)
 
     def _system_prompt(self) -> str:
         """
@@ -507,6 +588,25 @@ Rules:
 - Prefer protocol, UI, routing, auth, billing, search, indexing, or state-management concepts when present.
 - Do not add explanations outside the XML.
 - Output ONLY the XML."""
+
+    def _lightweight_single_system_prompt(self) -> str:
+        """
+        System prompt for compact single-packet metadata generation.
+        """
+        return """You are a code indexing assistant. Summarize one generated-code packet for semantic retrieval.
+
+Output format (JSON):
+{
+  "description": "One sentence describing the behavior or role.",
+  "keywords": ["kw1", "kw2", "kw3", "kw4"]
+}
+
+Rules:
+- Do not simply restate that it is a generated bundle artifact.
+- Use the packet context to infer behavior, protocol, UI, auth, billing, routing, analytics, or state-management roles when visible.
+- Keep the description concrete and under 20 words.
+- Keywords should be short, concrete, and reusable across projects.
+- Output ONLY valid JSON."""
 
     def _build_prompt(self, chunk: CodeChunk) -> str:
         """
@@ -583,6 +683,34 @@ Generate description and keywords."""
             )
 
         return "<items>\n" + "\n".join(items) + "\n</items>"
+
+    def _build_lightweight_single_prompt(self, chunk: CodeChunk) -> str:
+        """
+        Build one prompt for a single generated-code packet.
+        """
+        context_parts = [
+            f"Language: {chunk.language}",
+            f"File: {chunk.file_path}",
+            f"Symbol: {chunk.symbol_name} ({chunk.symbol_kind})",
+        ]
+        if chunk.parent:
+            context_parts.append(f"Parent: {chunk.parent}")
+        if chunk.signature:
+            context_parts.append(f"Signature: {chunk.signature}")
+
+        source_preview = chunk.source
+        marker = "\n\nRaw excerpt:\n"
+        if marker in source_preview:
+            source_preview = source_preview.split(marker, 1)[0]
+        if len(source_preview) > 900:
+            source_preview = source_preview[:900] + "\n... [truncated]"
+
+        return f"""Context:
+{chr(10).join(context_parts)}
+
+Packet:
+{source_preview}
+"""
 
     def _parse_response(self, content: str) -> dict[str, any]:
         """

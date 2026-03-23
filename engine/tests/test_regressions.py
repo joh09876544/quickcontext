@@ -427,6 +427,7 @@ class RegressionTests(unittest.TestCase):
             chunks = builder.build_chunks([extraction])
 
         self.assertTrue(chunks)
+        self.assertEqual(chunks[0].symbol_name, "<artifact_summary>")
         self.assertIn("Generated bundle summary", chunks[0].source)
         self.assertIn("client.checkProTrialEligibility", chunks[0].source)
         self.assertIn("client.getPlanStatus", chunks[0].source)
@@ -437,7 +438,7 @@ class RegressionTests(unittest.TestCase):
         self.assertIn(0, offsets)
         self.assertIn(876000, offsets)
         self.assertIn(438000, offsets)
-        self.assertGreaterEqual(len(offsets), 3)
+        self.assertGreaterEqual(len(offsets), 5)
 
     def test_find_artifact_signal_offsets_prefers_trial_related_regions(self) -> None:
         source = (

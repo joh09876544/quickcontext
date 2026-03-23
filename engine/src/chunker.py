@@ -160,13 +160,13 @@ class ChunkBuilder:
         if total_bytes == 0:
             return []
         file_signals = extract_artifact_semantic_signals(content, file_name=Path(file_path).name)
-        summary_signals = self._artifact_summary_signals(
+        summary_sections = self._artifact_summary_sections(
             source=content,
             file_name=Path(file_path).name,
             total_bytes=total_bytes,
             window_size=min(self._artifact_chunk_size, self._max_chunk_bytes),
         )
-        reserve_summary = 1 if summary_signals is not None else 0
+        reserve_summary = 1 if summary_sections else 0
 
         desired_chunks = min(
             max(1, self._artifact_max_chunks - reserve_summary),
@@ -181,31 +181,31 @@ class ChunkBuilder:
         )
         chunks: list[CodeChunk] = []
 
-        if summary_signals is not None:
-            summary_source = render_artifact_signal_packet(
-                file_path=file_path,
-                heading=f"Generated bundle summary for {Path(file_path).name}",
-                signals=summary_signals,
-                extra_lines=["Scope: distributed structural hotspots across the file"],
-            )
-            summary_symbol_name = (
-                (summary_signals.call_targets[0] if summary_signals.call_targets else None)
-                or (summary_signals.methods[0] if summary_signals.methods else None)
-                or (summary_signals.field_names[0] if summary_signals.field_names else None)
-                or "<artifact_summary>"
-            )
+        if summary_sections:
+            summary_lines = [f"Generated bundle summary for {Path(file_path).name}"]
+            for idx, section in enumerate(summary_sections, 1):
+                summary_lines.append(
+                    render_artifact_signal_packet(
+                        file_path=file_path,
+                        heading=f"Region {idx}",
+                        signals=section,
+                    )
+                )
+            summary_source = "\n\n".join(summary_lines)
+            summary_symbol_name = "<artifact_summary>"
             summary_signature = None
-            if summary_signals.call_targets:
-                summary_signature = "calls: " + ", ".join(summary_signals.call_targets[:4])
-            elif summary_signals.methods:
-                summary_signature = "methods: " + ", ".join(summary_signals.methods[:4])
+            first_section = summary_sections[0]
+            if first_section.call_targets:
+                summary_signature = "calls: " + ", ".join(first_section.call_targets[:4])
+            elif first_section.methods:
+                summary_signature = "methods: " + ", ".join(first_section.methods[:4])
             chunks.append(
                 CodeChunk(
                     chunk_id=self._generate_chunk_id(
                         file_path,
                         summary_symbol_name,
                         "file_artifact",
-                        summary_signals.services[0].split(".")[-1] if summary_signals.services else None,
+                        None,
                         summary_signature,
                         0,
                         total_bytes,
@@ -221,7 +221,7 @@ class ChunkBuilder:
                     byte_end=total_bytes,
                     signature=summary_signature,
                     docstring=None,
-                    parent=summary_signals.services[0].split(".")[-1] if summary_signals.services else None,
+                    parent=None,
                     visibility=None,
                     role="generated",
                     file_hash=resolved_file_hash,
@@ -301,7 +301,7 @@ class ChunkBuilder:
 
         return chunks
 
-    def _artifact_summary_signals(
+    def _artifact_summary_sections(
         self,
         source: str,
         file_name: str,
@@ -309,12 +309,12 @@ class ChunkBuilder:
         window_size: int,
     ):
         """
-        Aggregate same-file structural signals from distributed hotspots into one summary packet.
+        Collect distributed same-file structural signals for one summary packet.
         """
         bucket_count = max(6, min(12, int(math.ceil(total_bytes / max(1, window_size * 2)))))
         ranked_offsets = rank_artifact_signal_offsets(source, limit=512)
         if not ranked_offsets:
-            return None
+            return []
 
         bucket_best: dict[int, int] = {}
         for char_offset, _score in ranked_offsets:
@@ -324,21 +324,20 @@ class ChunkBuilder:
                 bucket_best[bucket] = byte_offset
 
         source_bytes = source.encode("utf-8")
-        snippets: list[str] = []
+        sections = []
         for bucket in sorted(bucket_best):
             byte_offset = bucket_best[bucket]
-            start = max(0, byte_offset - 480)
-            end = min(total_bytes, byte_offset + 1400)
+            radius = max(4096, window_size // 2)
+            start = max(0, byte_offset - radius)
+            end = min(total_bytes, byte_offset + radius)
             if end <= start:
                 continue
             snippet = source_bytes[start:end].decode("utf-8", errors="ignore")
             if snippet.strip():
-                snippets.append(snippet)
-
-        if not snippets:
-            return None
-
-        return extract_artifact_semantic_signals("\n".join(snippets), file_name=file_name)
+                section = extract_artifact_semantic_signals(snippet, file_name=file_name)
+                if section.methods or section.call_targets or section.field_names or section.message_types:
+                    sections.append(section)
+        return sections
 
     def _artifact_sample_offsets(
         self,
@@ -359,6 +358,10 @@ class ChunkBuilder:
             target_count = max(target_count, 3)
         if total_bytes > window_size * 6:
             target_count = max(target_count, 4)
+        if total_bytes > window_size * 12:
+            target_count = max(target_count, 5)
+        if total_bytes > window_size * 20:
+            target_count = max(target_count, 6)
 
         ordered_offsets: list[int] = []
 
