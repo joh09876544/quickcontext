@@ -13,7 +13,7 @@ use super::types;
 
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -230,8 +230,8 @@ impl LspClient {
     /// Sends `shutdown` request, waits for acknowledgement, then sends `exit` notification.
     pub async fn shutdown(&mut self) -> Result<(), String> {
         if self.initialized {
-            let _ = self.request("shutdown", None).await;
-            let _ = self.notify("exit", None).await;
+            let _ = timeout(SHUTDOWN_TIMEOUT, self.request("shutdown", None)).await;
+            let _ = timeout(SHUTDOWN_TIMEOUT, self.notify("exit", None)).await;
             self.initialized = false;
 
             eprintln!("[lsp:{}] shutdown", self.spec.name);

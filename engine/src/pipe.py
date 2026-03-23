@@ -16,6 +16,7 @@ _LAUNCHED_SERVER_PROCESSES: list[subprocess.Popen] = []
 CONNECT_RETRY_SLEEP_SECONDS = 0.005
 ENSURE_SERVER_PRECHECK_TIMEOUT_MS = 10
 WAIT_NAMED_PIPE_POLL_MS = 10
+LAUNCHED_SERVER_SHUTDOWN_WAIT_SECONDS = 1.5
 
 if IS_WINDOWS:
     import ctypes
@@ -104,6 +105,28 @@ class PipeConnectionError(PipeError):
 class PipeProtocolError(PipeError):
     """Raised on framing or serialization errors."""
     pass
+
+
+def _reap_launched_server_processes(wait_seconds: float = LAUNCHED_SERVER_SHUTDOWN_WAIT_SECONDS) -> None:
+    alive: list[subprocess.Popen] = []
+    for proc in _LAUNCHED_SERVER_PROCESSES:
+        if proc.poll() is not None:
+            continue
+        try:
+            proc.wait(timeout=wait_seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.terminate()
+                proc.wait(timeout=0.5)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=0.5)
+                except Exception:
+                    alive.append(proc)
+        except Exception:
+            alive.append(proc)
+    _LAUNCHED_SERVER_PROCESSES[:] = [proc for proc in alive if proc.poll() is None]
 
 
 class PipeClient:
@@ -1297,10 +1320,21 @@ class PipeClient:
     def shutdown(self) -> None:
         """Send a shutdown request to the server, then close the transport."""
         try:
+            self.connect(timeout_ms=250)
+        except PipeConnectionError:
+            pass
+
+        try:
+            try:
+                self.lsp_shutdown_all()
+            except PipeError:
+                pass
             self.request({"method": "shutdown"})
         except PipeConnectionError:
             pass
-        self.close()
+        finally:
+            self.close()
+            _reap_launched_server_processes()
 
     def ensure_server(self, timeout_ms: int = 10000) -> None:
         """Connects to the server, starting it if necessary.
@@ -1339,10 +1373,7 @@ class PipeClient:
             popen_kwargs["start_new_session"] = True
 
         proc = subprocess.Popen([str(svc), "serve"], **popen_kwargs)
-        _LAUNCHED_SERVER_PROCESSES[:] = [
-            item for item in _LAUNCHED_SERVER_PROCESSES
-            if item.poll() is None
-        ]
+        _LAUNCHED_SERVER_PROCESSES[:] = [item for item in _LAUNCHED_SERVER_PROCESSES if item.poll() is None]
         _LAUNCHED_SERVER_PROCESSES.append(proc)
 
         self.connect(timeout_ms=timeout_ms)

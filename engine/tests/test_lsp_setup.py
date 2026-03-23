@@ -91,6 +91,32 @@ class LspSetupTests(unittest.TestCase):
         request.assert_called_once_with({"method": "lsp_shutdown_all"})
         self.assertEqual(result, {"stopped_sessions": 2})
 
+    def test_pipe_client_shutdown_reaps_launched_processes(self) -> None:
+        client = PipeClient()
+        fake_proc = mock.Mock()
+        fake_proc.poll.side_effect = [None, 0]
+        with mock.patch("engine.src.pipe._LAUNCHED_SERVER_PROCESSES", [fake_proc]), mock.patch.object(
+            client,
+            "connect",
+        ) as connect, mock.patch.object(
+            client,
+            "lsp_shutdown_all",
+            return_value={"stopped_sessions": 1},
+        ), mock.patch.object(
+            client,
+            "request",
+            return_value={"status": "ok", "data": None},
+        ) as request, mock.patch.object(
+            client,
+            "close",
+        ) as close:
+            client.shutdown()
+
+        connect.assert_called_once()
+        request.assert_called_once_with({"method": "shutdown"})
+        fake_proc.wait.assert_called_once()
+        close.assert_called_once()
+
     def test_lsp_check_marks_missing_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

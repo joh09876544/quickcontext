@@ -279,7 +279,7 @@ async fn handle_client(
 }
 
 
-async fn dispatch(req: Request, specs: &[LanguageSpec], cancel: &CancellationToken) -> Response {
+async fn dispatch(req: Request, specs: &[LanguageSpec], _cancel: &CancellationToken) -> Response {
     match req {
         Request::Extract {
             path,
@@ -578,7 +578,13 @@ async fn dispatch(req: Request, specs: &[LanguageSpec], cancel: &CancellationTok
         Request::LspShutdownAll => handle_lsp_shutdown_all().await,
         Request::Shutdown => {
             eprintln!("[quickcontext] shutdown requested");
-            cancel.cancel();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                let mgr = lsp::manager::global();
+                let mut mgr = mgr.lock().await;
+                mgr.shutdown_all().await;
+                std::process::exit(0);
+            });
             Response::ok_empty()
         }
     }
