@@ -216,6 +216,67 @@ class DescriptionGenerator:
         self._temperature = temperature
         self._openrouter_provider = openrouter_provider
 
+    def _artifact_metadata_cache_dir(self) -> Path:
+        cache_dir = Path.cwd().resolve() / ".quickcontext" / "artifact_metadata"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
+
+    def _artifact_metadata_cache_path(self, chunk: CodeChunk, max_tokens: int | None) -> Path:
+        key = f"{self._model}:{max_tokens or self._max_tokens}:{chunk.chunk_id}"
+        digest = re.sub(r"[^a-zA-Z0-9_-]", "_", key)
+        if len(digest) > 120:
+            import hashlib
+            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return self._artifact_metadata_cache_dir() / f"{digest}.json"
+
+    def _load_cached_artifact_metadata(
+        self,
+        chunk: CodeChunk,
+        max_tokens: int | None,
+    ) -> ChunkDescription | None:
+        cache_path = self._artifact_metadata_cache_path(chunk, max_tokens)
+        if not cache_path.exists():
+            return None
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            description = str(payload.get("description", "") or "").strip()
+            keywords = [str(keyword).strip() for keyword in payload.get("keywords", []) if str(keyword).strip()]
+            if not description or not keywords:
+                return None
+            return ChunkDescription(
+                chunk_id=chunk.chunk_id,
+                description=description,
+                keywords=keywords,
+                token_count=0,
+                cost_usd=0.0,
+            )
+        except Exception:
+            return None
+
+    def _store_cached_artifact_metadata(
+        self,
+        chunk: CodeChunk,
+        description: ChunkDescription,
+        max_tokens: int | None,
+    ) -> None:
+        if not description.description or not description.keywords:
+            return
+        cache_path = self._artifact_metadata_cache_path(chunk, max_tokens)
+        try:
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "chunk_id": description.chunk_id,
+                        "description": description.description,
+                        "keywords": description.keywords,
+                    },
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            return
+
     def generate(self, chunk: CodeChunk) -> ChunkDescription:
         """
         Generate description and keywords for a code chunk.
@@ -295,16 +356,30 @@ class DescriptionGenerator:
         if not chunks:
             return []
 
-        out: list[ChunkDescription] = []
+        out_by_id: dict[str, ChunkDescription] = {}
+        pending: list[CodeChunk] = []
+        for chunk in chunks:
+            cached = self._load_cached_artifact_metadata(chunk, max_tokens)
+            if cached is not None:
+                out_by_id[chunk.chunk_id] = cached
+            else:
+                pending.append(chunk)
+
+        if not pending:
+            return [out_by_id[chunk.chunk_id] for chunk in chunks]
+
         completed = 0
         batch_size = max(1, int(request_batch_size))
-        for start in range(0, len(chunks), batch_size):
-            batch = chunks[start:start + batch_size]
-            out.extend(self._generate_lightweight_metadata_once(batch, max_tokens=max_tokens))
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start:start + batch_size]
+            generated = self._generate_lightweight_metadata_once(batch, max_tokens=max_tokens)
+            for chunk, description in zip(batch, generated):
+                out_by_id[chunk.chunk_id] = description
+                self._store_cached_artifact_metadata(chunk, description, max_tokens)
             completed += len(batch)
             if progress_callback is not None:
-                progress_callback(completed, len(chunks))
-        return out
+                progress_callback(completed, len(pending))
+        return [out_by_id.get(chunk.chunk_id, build_fallback_description(chunk)) for chunk in chunks]
 
     async def _generate_batch_async(
         self,

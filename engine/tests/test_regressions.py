@@ -487,6 +487,43 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(parsed["0"]["keywords"], ["trial", "eligibility", "plan", "billing"])
         self.assertEqual(parsed["1"]["keywords"], ["auth", "account", "session"])
 
+    def test_generate_lightweight_metadata_batch_uses_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cwd = Path.cwd()
+            os.chdir(tmp)
+            try:
+                generator = DescriptionGenerator(model="m", api_key="k")
+                chunk = CodeChunk(
+                    chunk_id="artifact-1",
+                    source="summary packet",
+                    language="javascript",
+                    file_path="bundle.js",
+                    symbol_name="<artifact_summary>",
+                    symbol_kind="file_artifact",
+                    line_start=1,
+                    line_end=5,
+                    byte_start=0,
+                    byte_end=50,
+                    signature=None,
+                    docstring=None,
+                    parent=None,
+                    visibility=None,
+                    role="generated",
+                    file_hash="hash",
+                )
+                cached = ChunkDescription("artifact-1", "cached", ["bundle"], 0, 0.0)
+                generator._store_cached_artifact_metadata(chunk, cached, 512)
+                with mock.patch.object(
+                    generator,
+                    "_generate_lightweight_metadata_once",
+                    side_effect=AssertionError("LLM path should not run"),
+                ):
+                    out = generator.generate_lightweight_metadata_batch([chunk], request_batch_size=4, max_tokens=512)
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(out[0].description, "cached")
+
     def test_dual_embedder_parallelizes_remote_code_and_description_embeddings(self) -> None:
         chunk = CodeChunk(
             chunk_id="chunk-1",
