@@ -162,6 +162,42 @@ def extract_artifact_semantic_signals(source: str, file_name: str | None = None)
     )
 
 
+def find_artifact_signal_offsets(source: str, limit: int = 12) -> list[int]:
+    """
+    Find structurally interesting character offsets inside a generated artifact.
+    """
+    scored: list[tuple[int, float]] = []
+    patterns = (
+        (_SERVICE_PATTERN, 3.5),
+        (_TYPE_PATTERN, 2.6),
+        (_CLIENT_METHOD_PATTERN, 3.2),
+        (_METHOD_NAME_PATTERN, 2.8),
+        (_FIELD_PATTERN, 2.2),
+        (_STRING_PATTERN, 1.6),
+    )
+    for pattern, base_score in patterns:
+        for match in pattern.finditer(source):
+            text = match.group(1) if match.groups() else match.group(0)
+            if pattern is _STRING_PATTERN:
+                lowered = text.lower()
+                if "http" in lowered or "/" in text or "\\" in text or " " not in text:
+                    continue
+                if not set(_split_tokens(text)).intersection(_STRING_FOCUS_TOKENS):
+                    continue
+            token_bonus = min(len(_split_tokens(text)) * 0.08, 0.8)
+            scored.append((match.start(), base_score + token_bonus))
+
+    scored.sort(key=lambda item: (-item[1], item[0]))
+    out: list[int] = []
+    for offset, _score in scored:
+        if any(abs(offset - existing) < 240 for existing in out):
+            continue
+        out.append(offset)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def build_artifact_semantic_projection(
     source: str,
     file_path: str,

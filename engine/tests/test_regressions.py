@@ -11,12 +11,13 @@ import builtins
 from engine.__main__ import _find_command
 from engine.sdk import QuickContext
 from engine.src.artifact_index import ARTIFACT_FALLBACK_ERROR, ArtifactIndexProfile, should_downgrade_artifact_profile
+from engine.src.artifact_semantics import find_artifact_signal_offsets
 from engine.src.chunk_filter import ChunkFilterConfig, filter_chunks
 from engine.src.chunker import ChunkBuilder, CodeChunk
 from engine.src.collection import CollectionManager
 from engine.src.config import CollectionVectorConfig, EngineConfig, QdrantConfig
 from engine.src.dedup import deduplicate_chunks
-from engine.src.describer import build_fallback_description
+from engine.src.describer import DescriptionGenerator, build_fallback_description
 from engine.src.embedder import DualEmbedder, EmbeddingProviderStats
 from engine.src.filecache import FileSignatureCache
 from engine.src.index_resume import ResumeFile, ResumeState, build_settings_fingerprint, clear_state, load_state, save_state
@@ -406,10 +407,24 @@ class RegressionTests(unittest.TestCase):
     def test_artifact_sampling_includes_midpoint_for_large_bundles(self) -> None:
         builder = ChunkBuilder(artifact_chunk_size=24000, artifact_max_chunks=8)
         offsets = builder._artifact_sample_offsets(total_bytes=900000, window_size=24000, chunk_count=2)
-        self.assertEqual(offsets[0], 0)
-        self.assertEqual(offsets[-1], 876000)
+        self.assertIn(0, offsets)
+        self.assertIn(876000, offsets)
         self.assertIn(438000, offsets)
         self.assertGreaterEqual(len(offsets), 3)
+
+    def test_find_artifact_signal_offsets_prefers_trial_related_regions(self) -> None:
+        source = (
+            "const filler = 1;\n" * 200
+            + 'this.checkProTrialEligibility = async (e) => client.checkProTrialEligibility(e);\n'
+            + '(sg.typeName = "exa.seat_management_pb.CheckProTrialEligibilityResponse");\n'
+            + '{ no: 1, name: "is_eligible", kind: "scalar", T: 8 },\n'
+            + '{ no: 2, name: "used_trial", kind: "scalar", T: 8 },\n'
+            + '"User is not logged in."\n'
+        )
+        offsets = find_artifact_signal_offsets(source, limit=6)
+        trial_offset = source.index("checkProTrialEligibility")
+        self.assertTrue(offsets)
+        self.assertTrue(any(abs(offset - trial_offset) < 200 for offset in offsets))
 
     def test_dual_embedder_parallelizes_remote_code_and_description_embeddings(self) -> None:
         chunk = CodeChunk(

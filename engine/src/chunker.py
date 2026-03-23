@@ -10,6 +10,7 @@ from engine.src.artifact_index import ARTIFACT_FALLBACK_ERROR
 from engine.src.artifact_semantics import (
     build_artifact_semantic_projection,
     extract_artifact_semantic_signals,
+    find_artifact_signal_offsets,
 )
 from engine.src.parsing import ExtractedSymbol, ExtractionResult
 
@@ -162,7 +163,12 @@ class ChunkBuilder:
             max(1, math.ceil(total_bytes / (512 * 1024))),
         )
         window_size = min(self._artifact_chunk_size, self._max_chunk_bytes)
-        offsets = self._artifact_sample_offsets(total_bytes, window_size, desired_chunks)
+        offsets = self._artifact_sample_offsets(
+            total_bytes,
+            window_size,
+            desired_chunks,
+            source=content,
+        )
         chunks: list[CodeChunk] = []
 
         for chunk_idx, offset in enumerate(offsets):
@@ -230,7 +236,13 @@ class ChunkBuilder:
 
         return chunks
 
-    def _artifact_sample_offsets(self, total_bytes: int, window_size: int, chunk_count: int) -> list[int]:
+    def _artifact_sample_offsets(
+        self,
+        total_bytes: int,
+        window_size: int,
+        chunk_count: int,
+        source: str | None = None,
+    ) -> list[int]:
         """
         Pick evenly spaced excerpt offsets across a large artifact file.
         """
@@ -244,17 +256,34 @@ class ChunkBuilder:
         if total_bytes > window_size * 6:
             target_count = max(target_count, 4)
 
-        offsets = {0, max_start}
-        if target_count >= 3:
-            offsets.add(int(round(max_start * 0.5)))
-        if target_count >= 4:
-            offsets.add(int(round(max_start * 0.25)))
-            offsets.add(int(round(max_start * 0.75)))
+        ordered_offsets: list[int] = []
 
-        if len(offsets) < target_count:
+        def _append_offset(offset: int) -> None:
+            normalized = max(0, min(max_start, int(offset)))
+            if any(abs(normalized - existing) < max(256, window_size // 3) for existing in ordered_offsets):
+                return
+            ordered_offsets.append(normalized)
+
+        if source:
+            for char_offset in find_artifact_signal_offsets(source, limit=max(target_count * 4, 8)):
+                byte_offset = len(source[:char_offset].encode("utf-8"))
+                _append_offset(byte_offset - (window_size // 6))
+                if len(ordered_offsets) >= target_count:
+                    break
+
+        _append_offset(0)
+        _append_offset(max_start)
+        if target_count >= 3:
+            _append_offset(int(round(max_start * 0.5)))
+        if target_count >= 4:
+            _append_offset(int(round(max_start * 0.25)))
+            _append_offset(int(round(max_start * 0.75)))
+
+        if len(ordered_offsets) < target_count:
             for idx in range(target_count):
-                offsets.add(int(round((max_start * idx) / max(1, target_count - 1))))
-        return sorted(offsets)
+                _append_offset(int(round((max_start * idx) / max(1, target_count - 1))))
+
+        return ordered_offsets[:target_count]
 
     def _normalize_artifact_excerpt(
         self,
