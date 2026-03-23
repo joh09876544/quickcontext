@@ -1763,6 +1763,57 @@ class RegressionTests(unittest.TestCase):
 
         self.assertLess(focused[0].score, match.score)
 
+    def test_focus_generated_file_match_results_penalizes_non_structural_ui_snippet(self) -> None:
+        qc = QuickContext(
+            EngineConfig(
+                qdrant=None,
+                code_embedding=None,
+                desc_embedding=None,
+                llm=None,
+                vectors=[],
+            )
+        )
+        try:
+            from engine.src.searcher import SearchResult
+
+            match = SearchResult(
+                10.0,
+                "bundle.12345678.js",
+                "bundle.12345678.js",
+                "file_match",
+                1,
+                3,
+                "wrong snippet",
+                "wrong snippet",
+            )
+            grep_match = type(
+                "GrepMatch",
+                (),
+                {
+                    "line_number": 20,
+                    "context_before": ("return (",),
+                    "line": 'b.start(\"visible\")',
+                    "context_after": ("});",),
+                },
+            )()
+
+            def _fake_grep(query, path, limit, before_context, after_context):
+                if query == "start":
+                    return type("GrepResult", (), {"matches": [grep_match]})()
+                return type("GrepResult", (), {"matches": []})()
+
+            with mock.patch.object(qc, "grep_text", side_effect=_fake_grep):
+                focused = qc._focus_generated_file_match_results(
+                    "What are the requirements to start a free trial?",
+                    [match],
+                    path="C:/tmp/windsurf.com",
+                    max_files=1,
+                )
+        finally:
+            qc.close()
+
+        self.assertLess(focused[0].score, match.score)
+
     def test_lsp_symbols_to_extracted_symbols_maps_document_symbols(self) -> None:
         qc = QuickContext(
             EngineConfig(

@@ -2952,6 +2952,14 @@ class QuickContext:
             block = "\n".join(snippet_lines).lower()
             if matched_terms and matched_terms.issubset(project_terms) and domain_terms and not any(term in block for term in domain_terms):
                 penalty_factor = 0.55
+            structural_markers = bool(
+                re.search(
+                    r"[a-z0-9]+_[a-z0-9_]+|typename|name:\s*\"[^\"]+\"",
+                    block,
+                )
+            )
+            if domain_terms and not any(term in block for term in domain_terms) and not structural_markers:
+                penalty_factor *= 0.55
         focused_source = "\n".join(snippet_lines)
         focused_description = str(getattr(item, "description", "") or "")
         llm_cfg = self._config.llm
